@@ -1,4 +1,4 @@
-//! zero — local agentic AI built around OpenVINO Model Server.
+//! zero — local agentic AI built around llama.cpp.
 //!
 //! Top-level entry point. Wires up Tauri plugins, builds shared app state,
 //! initialises the SQLite database, then registers every IPC command.
@@ -40,9 +40,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,

@@ -44,7 +44,7 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Local agentic AI on Intel hardware",
-    "longDescription": "ZerØ — fast, simple local AI built around Llama.cpp."
+    "shortDescription": "Fast, simple local agentic AI",
+    "longDescription": "ZerØ — fast, simple local agentic AI built around llama.cpp. Auto-installs the right build for your hardware: NVIDIA CUDA, Intel OpenVINO, AMD HIP, or CPU."
   }
 }

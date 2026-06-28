@@ -23,11 +23,9 @@
     "core:app:default",
     "opener:default",
     "dialog:default",
-    "store:default",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
-    "fs:default",
     "notification:default"
   ]
 }

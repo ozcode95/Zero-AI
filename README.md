@@ -1,21 +1,41 @@
 # ZerØ
 
-A fast, simple **local** agentic AI desktop app. Built for low-end Intel laptops first, scales up to higher-end machines.
+<p align="center">
+  <img src="public/icon.png" alt="ZerØ logo" width="128" />
+</p>
 
-- **Runtime:** [OpenVINO Model Server](https://docs.openvino.ai/2026/index.html) (python-free `ovms.exe`)
-- **Future runtimes:** ollama, llama.cpp (same OpenAI-compatible interface)
-- **UI:** Tauri 2 + React + Tailwind v4 (TUI-style)
-- **State:** Zustand on the front, SQLite (`sqlx` + `sqlite-vec`) on the back
+A fast, simple **local** agentic AI desktop app. Built for low-end Intel laptops first, scales up to higher-end machines (NVIDIA / AMD / Intel GPUs).
+
+> **Zero cloud.** Everything runs on your machine via llama.cpp — no servers, no egress.
+> **Zero billing.** No tokens, no API keys, no subscriptions. Your hardware is the only bill.
+> **Zero command line.** A full desktop UI — browse, download, chat, and run agents without a terminal.
+> **Zero config.** Auto-detects your hardware and installs the right build for it.
+> **Zero telemetry.** Nothing about you or your data ever leaves the device.
+
+- **Runtime:** [llama.cpp](https://github.com/ggml-org/llama.cpp) (bundled `llama-server`, OpenAI-compatible). ZerØ auto-installs the build that matches your hardware:
+  - **CUDA** — NVIDIA GPUs
+  - **OpenVINO** — Intel CPUs, iGPUs, and Arc dGPUs
+  - **HIP/ROCm** — AMD Radeon dGPUs
+  - **CPU** — fallback when no supported accelerator is detected
+- **Audio:** [whisper.cpp](https://github.com/ggml-org/whisper.cpp) for speech-to-text and `llama-tts` for text-to-speech
+- **Other providers:** ollama or any OpenAI-compatible endpoint (same chat interface, different base URL)
+- **UI:** Tauri 2 + React 19 + Tailwind v4 (Fluent Design–inspired)
+- **State:** Zustand on the front, SQLite (`sqlx`) on the back
 - **Storage root:** `~/.zero/` (same path on Windows, macOS, and Linux)
 
-## Features (planned phases)
+## Features
 
-1. **MVP (this scaffold):** shell + system probe + OVMS lifecycle + HF model browse/download + streaming chat + conversation persistence
-2. **Multimodal chat + extensibility:** image / document upload (OpenAI vision shape over the OVMS chat endpoint), user-authored skills (`~/.zero/skills/<id>/SKILL.md`), and external MCP servers (HTTP/SSE) listed + smoke-tested from the Tools page
-3. Built-in MCP tools (shell, fs, http, clipboard, notify, task.create) + agent loop wiring them in
-4. Memory (short-term summary + long-term vector recall)
-5. Agent loop (ReAct, tool calls, safety caps)
-6. Scheduler (cron + interval + manual click-to-run agents)
+- System probe (CPU / RAM / GPU + VRAM) with hardware-aware model recommendations
+- llama.cpp lifecycle: install the right variant, load/swap GGUF models per backend
+- Hugging Face model browse + multi-file GGUF download
+- Streaming chat with conversation persistence
+- Multimodal chat: image / document upload (OpenAI vision shape over the chat endpoint)
+- User-authored skills (`~/.zero/skills/<id>/SKILL.md`)
+- Built-in MCP tools (shell, fs, http, web search/read, clipboard, notify, task.create) plus external MCP servers (HTTP/SSE) listed + smoke-tested from the Tools page
+- Knowledge-base documents grounded into the system prompt (Embedding page)
+- Short-term + long-term memory
+- Speech-to-text (whisper) and text-to-speech (llama-tts)
+- Scheduler: cron + interval + manual click-to-run tasks
 
 ## Getting started
 
@@ -34,9 +54,9 @@ pnpm tauri icon path/to/your-icon.png
 
 | Path | Purpose |
 | --- | --- |
-| `src/` | React frontend (TUI-style) |
+| `src/` | React frontend (Fluent Design–inspired) |
 | `src/stores/` | Zustand stores (one per domain) |
-| `src/components/tui/` | Reusable TUI primitives |
+| `src/components/tui/` | Reusable UI primitives |
 | `src/pages/` | Top-level views |
 | `src-tauri/src/` | Rust backend (one module per domain) |
 | `src-tauri/src/commands/` | Tauri IPC commands |
@@ -45,14 +65,20 @@ pnpm tauri icon path/to/your-icon.png
 
 ```
 ~/.zero/
-├── zero.db                 # SQLite (conversations, tasks, memory, vectors)
-├── system.json             # Cached hardware probe
-├── runtimes/ovms/          # Downloaded ovms.exe + deps
-├── models/                 # HF model cache (OpenVINO IR)
-├── attachments/<conv_id>/  # Persisted chat uploads (images + docs)
-├── skills/<skill_id>/      # SKILL.md + supporting resources
-├── logs/
-└── settings.json
+├── zero.db                      # SQLite (conversations, tasks, memory, runtime state)
+├── system.json                  # Cached hardware probe
+├── settings.json
+├── runtimes/
+│   ├── llama.cpp/<variant>/     # cuda | openvino | hip-radeon | cpu builds
+│   │   ├── ov_cache/            # OpenVINO compiled-graph cache
+│   │   └── models-preset.ini    # shared router model presets
+│   └── whisper.cpp/             # whisper-cli + backend DLLs
+├── models/                      # GGUF model cache
+│   └── whisper/                 # whisper ggml *.bin
+├── attachments/<conv_id>/       # persisted chat uploads (images + docs)
+├── skills/<skill_id>/           # SKILL.md + supporting resources
+├── documents/                   # knowledge-base files (embedding feature)
+└── logs/
 ```
 
 On Windows that resolves to `C:\Users\<you>\.zero\`. Older installs under
