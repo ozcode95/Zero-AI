@@ -10,7 +10,11 @@ import {
   type GgufFileInfo,
   type LocalModel,
 } from "@/stores/models";
-import { useLlamaStore, type OrchestratorInfo } from "@/stores/llama";
+import {
+  useLlamaStore,
+  isLlamaReady,
+  type OrchestratorInfo,
+} from "@/stores/llama";
 import { useSettingsStore } from "@/stores/settings";
 import { useSystemStore } from "@/stores/system";
 import { bytes, relativeTime } from "@/lib/format";
@@ -256,6 +260,10 @@ function InstalledModelsModal({
   const isModelLoaded = (m: LocalModel) =>
     !!llamaInfo &&
     llamaInfo.instances[llamaInfo.active_variant]?.loaded_model === m.id;
+  // The Load button (and any other llama.cpp operation) is only usable
+  // once the runtime is installed and operational. Until then loading a
+  // model would fail, so gate it off.
+  const runtimeReady = isLlamaReady(llamaInfo);
 
   return (
     <div
@@ -549,6 +557,12 @@ function InstalledModelsModal({
                           <TuiButton
                             variant="primary"
                             size="sm"
+                            disabled={!runtimeReady}
+                            title={
+                              runtimeReady
+                                ? undefined
+                                : "llama.cpp runtime not ready"
+                            }
                             onClick={() => void onLoad(m.id)}
                           >
                             Load

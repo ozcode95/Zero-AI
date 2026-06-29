@@ -20,7 +20,7 @@ import {
 } from "@/stores/chat";
 import { useUiStore } from "@/stores/ui";
 import { useModelsStore } from "@/stores/models";
-import { useLlamaStore } from "@/stores/llama";
+import { useLlamaStore, isLlamaReady } from "@/stores/llama";
 import { useMcpStore, type McpToolSchema } from "@/stores/mcp";
 import {
   useSettingsStore,
@@ -520,6 +520,8 @@ export function ChatView() {
     // with the loading state flipping back) would otherwise fire a
     // request the runtime isn't ready to serve.
     if (modelLoading) return;
+    // Likewise refuse to send before the llama.cpp runtime is ready.
+    if (runtimeNotReady) return;
     const atts = pending;
     // Build the structured overrides payload from the active preset
     // set. The Rust runner reads these directly off the persisted
@@ -822,6 +824,15 @@ export function ChatView() {
   const modelLoading = !!loadingTarget || llamaTransitional;
   const swapError =
     isLlamaProvider && llamaStatus === "error" && !!llamaLastError;
+  // The app isn't "ready" until the bundled llama.cpp runtime is
+  // installed and operational. While it isn't, gate the composer, the
+  // model picker, and every llama.cpp action so the user can't kick off
+  // work the runtime can't yet serve. Remote providers don't depend on
+  // the bundled runtime, so the gate only applies to llama.cpp.
+  const runtimeNotReady = isLlamaProvider && !isLlamaReady(llamaInfo);
+  // Convenience flag for the composer surfaces, which are all blocked
+  // while streaming, mid model-load, or before the runtime is ready.
+  const composerLocked = !!streamingId || modelLoading || runtimeNotReady;
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
@@ -845,7 +856,7 @@ export function ChatView() {
                 : modelOptions
             }
             providerLoaded={providerLoaded}
-            disabled={!!streamingId || modelLoading}
+            disabled={composerLocked}
             thinkActive={turnPresets.has("think")}
             onToggleThink={() => toggleTurnPreset("think")}
             onModelChange={async (v) => {
@@ -1028,7 +1039,7 @@ export function ChatView() {
             <ChatComposerAddMenu
               onAttach={() => void attachFiles()}
               attaching={attaching}
-              disabled={!!streamingId || modelLoading}
+              disabled={composerLocked}
               activePresets={turnPresets}
               onTogglePreset={toggleTurnPreset}
             />
@@ -1045,8 +1056,14 @@ export function ChatView() {
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onKey}
                 rows={Math.min(8, Math.max(1, draft.split("\n").length))}
-                placeholder={modelLoading ? "Loading model…" : "Ask anything…"}
-                disabled={modelLoading}
+                placeholder={
+                  runtimeNotReady
+                    ? "llama.cpp runtime not ready…"
+                    : modelLoading
+                      ? "Loading model…"
+                      : "Ask anything…"
+                }
+                disabled={modelLoading || runtimeNotReady}
                 style={{
                   display: "block",
                   boxSizing: "border-box",
@@ -1060,7 +1077,7 @@ export function ChatView() {
               samplingOverride={samplingOverride}
               providerSampling={activeProviderSampling}
               modelId={effectiveModel || null}
-              disabled={!!streamingId || modelLoading}
+              disabled={composerLocked}
               onChange={async (next) => {
                 // Same "create on demand" rule the header chips use —
                 // a user who tweaks sampling before sending anything
@@ -1162,9 +1179,17 @@ export function ChatView() {
                 type="button"
                 onClick={() => void onSend()}
                 disabled={
-                  (!draft.trim() && pending.length === 0) || modelLoading
+                  (!draft.trim() && pending.length === 0) ||
+                  modelLoading ||
+                  runtimeNotReady
                 }
-                title={modelLoading ? "Loading model…" : "Send"}
+                title={
+                  runtimeNotReady
+                    ? "llama.cpp runtime not ready"
+                    : modelLoading
+                      ? "Loading model…"
+                      : "Send"
+                }
                 aria-label="Send"
                 className={
                   "relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] " +

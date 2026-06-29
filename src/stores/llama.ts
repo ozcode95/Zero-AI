@@ -57,12 +57,7 @@ export interface LlamaLogLine {
 }
 
 export type InstallStage =
-  | "fetch_release"
-  | "download"
-  | "extract"
-  | "verify"
-  | "done"
-  | "error";
+  "fetch_release" | "download" | "extract" | "verify" | "done" | "error";
 
 export interface LlamaInstallProgress {
   stage: InstallStage;
@@ -91,6 +86,36 @@ export const VARIANT_DISPLAY: Record<VariantSlug, string> = {
   "hip-radeon": "HIP (AMD Radeon)",
   cpu: "CPU",
 };
+
+/**
+ * App-level readiness for the bundled llama.cpp runtime.
+ *
+ * The UI is "ready" once a usable runtime binary is installed and
+ * operational — i.e. the active variant (or, when none is active yet,
+ * any variant) is past the install stage and not errored. Until then
+ * the chat composer, the model pickers, and every llama.cpp operation
+ * (load model, send, etc.) are gated off so the user can't kick off
+ * work the runtime can't yet serve.
+ *
+ * Note: "ready" here means the runtime is *available to operate*, not
+ * that a model is currently loaded — loading a model is itself one of
+ * the operations this gate enables. Install/update controls are
+ * intentionally *not* gated by this (they're what bring the runtime to
+ * a ready state).
+ */
+export function isLlamaReady(info: OrchestratorInfo | null): boolean {
+  if (!info) return false;
+  const ready = (inst: LlamaInstanceInfo | undefined): boolean =>
+    !!inst &&
+    inst.status !== "not_installed" &&
+    inst.status !== "installing" &&
+    inst.status !== "error";
+  // Prefer the active variant the chat runner routes to; fall back to
+  // any installed instance so a freshly installed-but-not-yet-activated
+  // runtime still counts as ready.
+  if (ready(info.instances[info.active_variant])) return true;
+  return Object.values(info.instances).some(ready);
+}
 
 interface LlamaState {
   info: OrchestratorInfo | null;
