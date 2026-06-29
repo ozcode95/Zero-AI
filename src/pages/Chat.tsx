@@ -61,18 +61,20 @@ const EMPTY_PRESENTED_FILES: Record<string, PresentedFile[]> = {};
 const EMPTY_DISABLED_TOOLS: string[] = [];
 const EMPTY_DISABLED_BUILTINS: string[] = [];
 
-// ─── Per-turn composer presets ( + menu toggles ) ──────────────
+// ─── Composer presets ( + menu toggles ) ──────────────────────
 //
 // User-facing surface over the runner's per-turn capability flags.
-// Each preset is a turn-scoped toggle the user flips from the
-// composer `+` menu; when active, `onSend` writes the matching flag
-// into the structured `TurnOverrides` payload and then clears the
-// set so the unlock applies to exactly that one turn.
+// Each preset is a toggle the user flips from the composer `+` menu;
+// when active, `onSend` writes the matching flag into the structured
+// `TurnOverrides` payload of every message it sends. The toggles are
+// *sticky*: once turned on they stay on for the rest of the session
+// (every subsequent turn inherits them) until the user explicitly
+// toggles them back off via the menu or the inline chip.
 //
 // `think` is the one preset surfaced outside the `+` menu — it has a
 // dedicated toggle in the composer toolbar (see `ThinkToggle`) because
 // reasoning is a high-traffic control. All chats default to no-thinking
-// and the user explicitly opts *into* the reasoning trace for a turn.
+// and the user explicitly opts *into* the reasoning trace.
 type TurnPreset = "web" | "research" | "think";
 interface TurnPresetSpec {
   key: TurnPreset;
@@ -320,12 +322,14 @@ export function ChatView() {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<Attachment[]>([]);
   const [attaching, setAttaching] = useState(false);
-  // Per-turn capability toggles surfaced through the composer `+`
-  // menu. Each preset maps to a flag in `TurnOverrides` that the Rust
-  // runner reads off the persisted user message; we clear the set
-  // after `onSend` so the unlock stays scoped to one turn. Stored as
-  // a `Set` so toggling is O(1) and the rendered chip order is
-  // deterministic via the `TURN_PRESETS` list.
+  // Capability toggles surfaced through the composer `+` menu (and the
+  // inline Think toggle). Each preset maps to a flag in `TurnOverrides`
+  // that the Rust runner reads off the persisted user message. The
+  // toggles are sticky for the session: we no longer clear them after
+  // `onSend`, so an enabled capability carries into every subsequent
+  // turn until the user toggles it off. Stored as a `Set` so toggling
+  // is O(1) and the rendered chip order is deterministic via the
+  // `TURN_PRESETS` list.
   const [turnPresets, setTurnPresets] = useState<Set<TurnPreset>>(
     () => new Set(),
   );
@@ -533,7 +537,9 @@ export function ChatView() {
     };
     setDraft("");
     setPending([]);
-    setTurnPresets(new Set());
+    // Intentionally do NOT clear `turnPresets` here — the capability
+    // toggles (think / web search / deep research) are sticky and stay
+    // on for the rest of the session until the user turns them off.
     await send(txt, atts, overrides);
   }
 
@@ -1450,12 +1456,12 @@ function ThinkToggle({
 // Win11-style "new actions" popover that opens above a `+` icon at
 // the left of the chat input. Exposes:
 //   * "Add photos & files" — calls the existing `attachFiles` flow.
-//   * Per-turn capability toggles (web search, deep research) —
-//     surfaced as togglable rows that flip the matching
-//     `TurnOverrides` flag for the next turn. The set is cleared on
-//     send so each unlock is scoped to one message. Thinking is the
-//     one preset that lives outside this menu, in its own composer
-//     toggle (`ThinkToggle`).
+//   * Capability toggles (web search, deep research) — surfaced as
+//     togglable rows that flip the matching `TurnOverrides` flag. Once
+//     enabled they stay on for the rest of the session (applied to
+//     every turn) until toggled off. Thinking is the one preset that
+//     lives outside this menu, in its own composer toggle
+//     (`ThinkToggle`).
 function ChatComposerAddMenu({
   onAttach,
   attaching,

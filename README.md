@@ -8,6 +8,10 @@
 
 ZerØ auto‑detects your PC and installs the right `llama.cpp` build for it, so the same app runs well on an Intel‑only ultrabook *and* on a CUDA workstation. No cloud, no API keys, no terminal.
 
+<br />
+
+<img src="docs/screenshots/new_chat.png" alt="ZerØ chat interface" width="880" />
+
 </div>
 
 ---
@@ -50,6 +54,33 @@ Hardware-aware recommendations rank models by **memory fit** and **estimated tok
 - **Voice** — speech-to-text via `whisper.cpp` and text-to-speech via `llama-tts`
 - **Scheduler** — cron, interval, and click-to-run agent tasks
 - **Other providers** — point at ollama or any OpenAI-compatible endpoint; same chat UI, different base URL
+
+## Screenshots
+
+| Hardware-aware model library | Download & manage models |
+| --- | --- |
+| ![Models page](docs/screenshots/models_page.png) | ![Installed & downloading models](docs/screenshots/installed_downloading_model.png) |
+
+| Reasoning trace (Thinking) | Memory-aware conversations |
+| --- | --- |
+| ![Chat thinking](docs/screenshots/chat_thinking.png) | ![Chat memory](docs/screenshots/chat_memory.png) |
+
+| Agent tools (MCP) | Custom skills |
+| --- | --- |
+| ![MCP tools](docs/screenshots/mcp_tools.png) | ![Skills](docs/screenshots/skills.png) |
+
+<details>
+<summary>More screenshots</summary>
+
+| Provider settings | Memory settings |
+| --- | --- |
+| ![LLM provider settings](docs/screenshots/llm_provider_settings.png) | ![Memory settings](docs/screenshots/memory_settings.png) |
+
+| Voice (STT / TTS) setup | |
+| --- | --- |
+| ![Audio setup](docs/screenshots/audio_setup.png) | |
+
+</details>
 
 ## Tech stack
 
@@ -141,5 +172,3 @@ ZerØ stands on the shoulders of a lot of great open-source work. Huge thanks to
 - **Odysseus** by **PewDiePie** — his build-your-own local AI project was a big part of the inspiration to make capable, fully-local AI approachable on everyday Windows hardware.
 
 Thank you to everyone building in the open. 💛
-</content>
-</invoke>

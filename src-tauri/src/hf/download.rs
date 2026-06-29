@@ -351,7 +351,17 @@ pub async fn install_or_update(
                     size: sibling_size(s),
                 })
                 .collect();
-            let selection = select::select_gguf(&gguf_inputs, desired_quant.as_deref());
+            // Speculative-decoding / MTP draft shards are opt-in (off by
+            // default) because they can crash or fail to load on some
+            // llama.cpp build / GPU combinations, and they only get wired
+            // into the runtime when MTP is enabled. Don't waste bandwidth
+            // and disk pulling them otherwise.
+            let include_drafts = crate::settings::Settings::load()
+                .await
+                .map(|s| s.llama.mtp_enabled)
+                .unwrap_or(false);
+            let selection =
+                select::select_gguf(&gguf_inputs, desired_quant.as_deref(), include_drafts);
             tracing::info!(
                 target: "hf",
                 "quant selection for {id}: desired={:?}, target={:?}, keep={} gguf, skip={} gguf, mmproj={:?}, drafts={:?}",

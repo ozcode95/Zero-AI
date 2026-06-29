@@ -297,7 +297,17 @@ fn pick_mmproj(files: &[&GgufFile]) -> Option<String> {
 
 /// Decide which GGUF files to download for a repo, given the desired quant
 /// (defaults to `Q4_K_M` — the best all-round balance — when unknown).
-pub fn select_gguf(files: &[GgufFile], desired_quant: Option<&str>) -> Selection {
+///
+/// `include_drafts` gates speculative-decoding / MTP draft shards. They're
+/// only useful when MTP is enabled in Settings (off by default, since the
+/// drafts can crash or fail to load on some llama.cpp build / GPU combos),
+/// so when it's `false` we skip them entirely rather than waste bandwidth
+/// and disk on a feature that won't be wired in at load time.
+pub fn select_gguf(
+    files: &[GgufFile],
+    desired_quant: Option<&str>,
+    include_drafts: bool,
+) -> Selection {
     let desired = desired_quant
         .and_then(normalize_quant)
         .unwrap_or_else(|| "Q4_K_M".to_string());
@@ -310,10 +320,14 @@ pub fn select_gguf(files: &[GgufFile], desired_quant: Option<&str>) -> Selection
         .iter()
         .filter(|f| classify(&f.name) == Kind::Mmproj)
         .collect();
-    let drafts: Vec<&GgufFile> = files
-        .iter()
-        .filter(|f| classify(&f.name) == Kind::Draft)
-        .collect();
+    let drafts: Vec<&GgufFile> = if include_drafts {
+        files
+            .iter()
+            .filter(|f| classify(&f.name) == Kind::Draft)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let (target_quant, chosen_main) = select_group(&mains, &desired);
 
@@ -420,7 +434,7 @@ mod tests {
             f("Model-Q8_0.gguf", 9_000),
             f("config.json.gguf", 1), // not really a thing, but must not be main-misclassified by size
         ];
-        let sel = select_gguf(&files, Some("Q4_K_M"));
+        let sel = select_gguf(&files, Some("Q4_K_M"), true);
         assert_eq!(sel.target_quant.as_deref(), Some("Q4_K_M"));
         assert_eq!(sel.keep, vec!["Model-Q4_K_M.gguf".to_string()]);
         assert!(sel.skipped.contains(&"Model-Q8_0.gguf".to_string()));
@@ -436,7 +450,7 @@ mod tests {
             f("Q8_0/Model-Q8_0-00002-of-00003.gguf", 9_000),
             f("Q8_0/Model-Q8_0-00003-of-00003.gguf", 9_000),
         ];
-        let sel = select_gguf(&files, Some("Q4_K_M"));
+        let sel = select_gguf(&files, Some("Q4_K_M"), true);
         assert_eq!(sel.keep.len(), 2);
         assert!(sel.keep.iter().all(|n| n.contains("Q4_K_M")));
     }
@@ -451,7 +465,7 @@ mod tests {
             f("Model-MTP-Q4_K_M.gguf", 700),
             f("Model-MTP-Q8_0.gguf", 900),
         ];
-        let sel = select_gguf(&files, Some("Q4_K_M"));
+        let sel = select_gguf(&files, Some("Q4_K_M"), true);
         assert_eq!(sel.mmproj.as_deref(), Some("mmproj-F16.gguf"));
         assert_eq!(sel.drafts, vec!["Model-MTP-Q4_K_M.gguf".to_string()]);
         assert!(sel.keep.contains(&"mmproj-F16.gguf".to_string()));
@@ -462,10 +476,24 @@ mod tests {
     }
 
     #[test]
+    fn excludes_drafts_when_mtp_disabled() {
+        let files = vec![
+            f("Model-Q4_K_M.gguf", 5_000),
+            f("Model-MTP-Q4_K_M.gguf", 700),
+        ];
+        let sel = select_gguf(&files, Some("Q4_K_M"), false);
+        assert!(sel.drafts.is_empty());
+        assert!(!sel.keep.iter().any(|n| n.contains("MTP")));
+        assert!(sel.keep.contains(&"Model-Q4_K_M.gguf".to_string()));
+        // The draft shard is recorded as deliberately skipped.
+        assert!(sel.skipped.contains(&"Model-MTP-Q4_K_M.gguf".to_string()));
+    }
+
+    #[test]
     fn falls_back_to_closest_smaller_quant() {
         // Desired Q4_K_M is absent; Q3_K_M (<=) wins over Q5_K_M.
         let files = vec![f("Model-Q5_K_M.gguf", 6_000), f("Model-Q3_K_M.gguf", 4_000)];
-        let sel = select_gguf(&files, Some("Q4_K_M"));
+        let sel = select_gguf(&files, Some("Q4_K_M"), true);
         assert_eq!(sel.target_quant.as_deref(), Some("Q3_K_M"));
         assert_eq!(sel.keep, vec!["Model-Q3_K_M.gguf".to_string()]);
     }
@@ -474,14 +502,14 @@ mod tests {
     fn falls_back_to_smallest_above_when_nothing_smaller() {
         // Desired Q4_K_M absent and everything is bigger -> smallest above.
         let files = vec![f("Model-Q6_K.gguf", 8_000), f("Model-Q8_0.gguf", 9_000)];
-        let sel = select_gguf(&files, Some("Q4_K_M"));
+        let sel = select_gguf(&files, Some("Q4_K_M"), true);
         assert_eq!(sel.target_quant.as_deref(), Some("Q6_K"));
     }
 
     #[test]
     fn single_untokenized_model_is_kept() {
         let files = vec![f("model.gguf", 5_000)];
-        let sel = select_gguf(&files, Some("Q4_K_M"));
+        let sel = select_gguf(&files, Some("Q4_K_M"), true);
         assert_eq!(sel.keep, vec!["model.gguf".to_string()]);
         assert_eq!(sel.target_quant, None);
     }
@@ -492,7 +520,7 @@ mod tests {
             f("model-00001-of-00002.gguf", 5_000),
             f("model-00002-of-00002.gguf", 5_000),
         ];
-        let sel = select_gguf(&files, Some("Q4_K_M"));
+        let sel = select_gguf(&files, Some("Q4_K_M"), true);
         assert_eq!(sel.keep.len(), 2);
     }
 
@@ -503,7 +531,7 @@ mod tests {
             f("Model-Q4_K_M.gguf", 5_000),
             f("Model-Q8_0.gguf", 9_000),
         ];
-        let sel = select_gguf(&files, None);
+        let sel = select_gguf(&files, None, true);
         assert_eq!(sel.target_quant.as_deref(), Some("Q4_K_M"));
     }
 }
