@@ -627,6 +627,18 @@ async fn run_inner(
             t.server_id == BUILTIN_SERVER_ID
                 && t.schema.name == mcp::tools::discovery::TOOLS_LIST_NAME
         });
+    // While a workspace is open we force-advertise the coding tools
+    // (`fs.read`/`fs.edit`/`fs.write`/…) on every round even under lazy
+    // discovery — see the `round_tools` filter below. Without this the
+    // model can't see any file tools until it first calls `tools.list`,
+    // and in practice it skips that discovery step and just prints code
+    // for the user to paste instead of applying the edit itself.
+    let workspace_open = settings
+        .workspace_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
     let mut revealed_tools: HashSet<String> = HashSet::new();
 
     let max_iters = {
@@ -686,12 +698,17 @@ async fn run_inner(
                     // for discovery, must always know it can curate its
                     // persistent memory (mirroring Hermes Agent), and must
                     // always be able to load/author a skill the `# Skills`
-                    // catalog told it about. Everything else stays collapsed
-                    // until the model reveals it.
+                    // catalog told it about. The coding tools join them
+                    // whenever a workspace is open, so the agent can read
+                    // and edit project files directly instead of first
+                    // discovering them via `tools.list`. Everything else
+                    // stays collapsed until the model reveals it.
                     let always_on = t.server_id == BUILTIN_SERVER_ID
                         && (t.schema.name == mcp::tools::discovery::TOOLS_LIST_NAME
                             || t.schema.name == mcp::tools::memory::MEMORY_TOOL_NAME
-                            || t.schema.name == mcp::tools::skill::SKILL_TOOL_NAME);
+                            || t.schema.name == mcp::tools::skill::SKILL_TOOL_NAME
+                            || (workspace_open
+                                && crate::workspace::is_coding_tool(&t.schema.name)));
                     if always_on {
                         return true;
                     }
@@ -903,6 +920,16 @@ async fn run_inner(
             emit_delta(app, conversation_id, assistant_message_id, &banner);
             full_content.push_str(&banner);
 
+            // For file-mutating built-ins (`fs.write` / `fs.edit`), snapshot
+            // the target file *before* dispatch so we can render a diff card
+            // (+adds / −removes, expandable) once the write lands. Captured
+            // up front because `run_tool_call` performs the write itself.
+            let edit_snapshot = if last_round {
+                None
+            } else {
+                snapshot_file_edit(&tools, call).await
+            };
+
             // Built-ins that need the live chat context (clarifying
             // questions, file presentation, image viewing) are intercepted
             // here before the stateless registry dispatch — only they have
@@ -947,9 +974,17 @@ async fn run_inner(
                 text
             };
 
-            let result_block = render_result_block(&result_text);
-            emit_delta(app, conversation_id, assistant_message_id, &result_block);
-            full_content.push_str(&result_block);
+            // A successful `fs.write` / `fs.edit` that actually changed the
+            // file renders as a diff card (+adds / −removes, expandable);
+            // on a no-op, refusal, or error the file is unchanged and we fall
+            // back to the normal `[tool result]` block.
+            let edit_card = match edit_snapshot {
+                Some(snap) if !cancelled => render_file_edit_card(snap).await,
+                _ => None,
+            };
+            let block = edit_card.unwrap_or_else(|| render_result_block(&result_text));
+            emit_delta(app, conversation_id, assistant_message_id, &block);
+            full_content.push_str(&block);
 
             // Splice the tool's result back into the conversation as a
             // proper `role: "tool"` message bound to the assistant's
@@ -1940,6 +1975,105 @@ fn render_result_block(result: &str) -> String {
     format!("\n[tool result]\n```\n{trimmed}\n```\n\n")
 }
 
+// ─── File-edit diff cards ───────────────────────────────────────
+//
+// When the agent writes to a file in the workspace, the plain `[tool
+// result]` text ("wrote N bytes") is replaced in the UI by a richer diff
+// card showing `+adds -removes` and the change itself, expandable. The
+// card rides the same inline-marker protocol as the other runner asides so
+// it streams + persists through the existing path; the model still only
+// sees the concise tool result, keeping its context clean.
+
+/// File-edit snapshot captured *before* a `fs.write` / `fs.edit` dispatch so
+/// the runner can diff against the post-write state.
+struct FileEditSnapshot {
+    /// Resolved absolute path the tool will write to.
+    path: std::path::PathBuf,
+    /// File contents before the write, or `None` when the file didn't exist
+    /// yet (a creation).
+    before: Option<String>,
+}
+
+/// Largest file we'll read twice (before + after) to produce a diff card.
+/// Beyond this the edit still happens; we just skip the visual diff.
+const MAX_DIFF_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// If `call` targets a built-in file-mutating tool (`fs.write` / `fs.edit`),
+/// resolve its `path` argument and read the file's current contents so the
+/// runner can diff against the post-call state. Returns `None` for any other
+/// tool, an unresolvable / missing `path` argument, a non-UTF-8 file, or a
+/// file too large to diff cheaply.
+async fn snapshot_file_edit(tools: &[EnabledTool], call: &ToolCall) -> Option<FileEditSnapshot> {
+    let resolved = mcp_catalog::resolve_function_name(tools, call.function.name.as_str())?;
+    if resolved.server_id != BUILTIN_SERVER_ID {
+        return None;
+    }
+    let name = resolved.schema.name.as_str();
+    if name != "fs.write" && name != "fs.edit" {
+        return None;
+    }
+
+    let args = parse_tool_arguments(call.function.arguments.as_str());
+    let raw_path = args.get("path").and_then(|v| v.as_str())?.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+    let path = mcp::tools::fs::resolve_path(raw_path).ok()?;
+
+    // Read current contents. A missing file is a creation (before = None); an
+    // oversized file is skipped (no card, but the edit still proceeds).
+    let before = match tokio::fs::metadata(&path).await {
+        Ok(md) if md.is_file() && md.len() <= MAX_DIFF_FILE_BYTES => {
+            tokio::fs::read_to_string(&path).await.ok()
+        }
+        Ok(md) if md.is_file() => return None, // too large to diff cheaply
+        _ => None,                             // doesn't exist yet → creation
+    };
+    Some(FileEditSnapshot { path, before })
+}
+
+/// Read the file back after a write and render a diff card relative to the
+/// captured snapshot. Returns `None` when nothing changed (no-op write,
+/// refusal, or error) or the file can't be read back as UTF-8 text.
+async fn render_file_edit_card(snap: FileEditSnapshot) -> Option<String> {
+    // Guard the read-back the same way as the snapshot: a write that
+    // produced an enormous file is reported via the plain result block
+    // rather than slurped into memory to diff.
+    match tokio::fs::metadata(&snap.path).await {
+        Ok(md) if md.is_file() && md.len() > MAX_DIFF_FILE_BYTES => return None,
+        Ok(md) if md.is_file() => {}
+        _ => return None,
+    }
+    let after = tokio::fs::read_to_string(&snap.path).await.ok()?;
+    let created = snap.before.is_none();
+    let before = snap.before.unwrap_or_default();
+    if before == after {
+        return None;
+    }
+    let diff = chat::diff::compute(&before, &after);
+    let rel = crate::workspace::relativize(&snap.path);
+    Some(render_file_edit_block(&rel, diff, created))
+}
+
+/// Format a file-edit diff as an inline marker the frontend parses into an
+/// expandable diff card. The body sits inside a ```diff fence; every diff
+/// line carries a 1-char `+` / `-` / ` ` prefix, so no body line can
+/// prematurely close the fence.
+fn render_file_edit_block(path: &str, diff: chat::diff::FileDiff, created: bool) -> String {
+    let status = if created { "created" } else { "modified" };
+    let mut body = diff.body;
+    if diff.truncated {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str("[diff truncated]");
+    }
+    format!(
+        "\n[file edit: {path} | +{} -{} | {status}]\n```diff\n{body}\n```\n\n",
+        diff.stat.added, diff.stat.removed
+    )
+}
+
 /// Format a per-round reasoning trace as an inline markdown-ish block
 /// the frontend's assistant-content parser splits out and renders as a
 /// collapsible "Thinking" card. The block format mirrors the
@@ -2609,6 +2743,30 @@ async fn build_system_prompt(
         "The current date is {}.\n\n",
         chrono::Local::now().format("%A, %B %-d, %Y")
     ));
+    // Ground the model in the user's open project, if any. With a workspace
+    // set, relative `fs.*` paths resolve against this root, so we nudge the
+    // model toward project-relative paths and frame the folder as the thing
+    // it's working on.
+    if let Some(root) = settings
+        .workspace_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!(
+            "## Workspace\n\nYou are working inside a project workspace rooted at `{root}`. \
+             Treat this folder as the codebase the user wants you to work on.\n\n\
+             When the user asks you to create, edit, fix, or refactor code, APPLY the change \
+             yourself with the file tools rather than describing it. Use `fs.read` to inspect a \
+             file and `fs.list` / `fs.glob` / `fs.grep` to find things, then `fs.edit` for a \
+             targeted change or `fs.write` for a new or fully-rewritten file. Do NOT paste full \
+             file contents into the chat and ask the user to create the file or save it \
+             themselves — edit the files directly and let the resulting diff show what changed. \
+             Relative paths passed to the `fs.*` tools resolve against this root, so prefer \
+             concise project-relative paths like `src/main.rs` over absolute ones. Read before \
+             you edit, keep changes scoped, and match the surrounding style.\n\n"
+        ));
+    }
     // Single neutral tool-use policy. We deliberately do NOT branch on
     // `loop_mode` (formerly the `/loop` slash-command, now the
     // composer's Agent preset): the earlier per-mode hints framed an
@@ -3177,6 +3335,45 @@ mod tests {
         let prompt = build_system_prompt(&settings, &[], false, false, false, false, "").await;
         assert!(!prompt.contains("```tool_use"));
         assert!(!prompt.contains("Tool-call protocol"));
+    }
+
+    /// With a workspace open, the prompt must carry the `## Workspace`
+    /// section and, crucially, instruct the model to APPLY edits with the
+    /// file tools rather than printing code for the user to paste. This is
+    /// the behavioural half of the fix for "the agent asks me to create the
+    /// file myself" — the other half force-advertises the fs tools.
+    #[tokio::test]
+    async fn build_system_prompt_workspace_section_directs_direct_edits() {
+        let mut settings = Settings::default();
+        settings.workspace_root = Some(
+            if cfg!(windows) {
+                r"C:\proj\app"
+            } else {
+                "/proj/app"
+            }
+            .into(),
+        );
+        let prompt = build_system_prompt(&settings, &[], false, false, true, false, "").await;
+        assert!(prompt.contains("## Workspace"));
+        assert!(prompt.contains("C:\\proj\\app") || prompt.contains("/proj/app"));
+        // Directs the model at the actual mutation tools…
+        assert!(prompt.contains("fs.edit") && prompt.contains("fs.write"));
+        // …and forbids the paste-it-yourself fallback the user hit.
+        assert!(
+            prompt.contains("Do NOT paste"),
+            "workspace section must forbid pasting file contents for the user to save"
+        );
+    }
+
+    /// Without a workspace the section must be absent entirely — no
+    /// dangling header, and no file-tool instructions for a codebase the
+    /// model isn't pointed at.
+    #[tokio::test]
+    async fn build_system_prompt_omits_workspace_section_without_root() {
+        let settings = Settings::default();
+        assert!(settings.workspace_root.is_none());
+        let prompt = build_system_prompt(&settings, &[], false, false, true, false, "").await;
+        assert!(!prompt.contains("## Workspace"));
     }
 
     /// With no skills enabled, the `# Skills` catalog section must be
@@ -4036,6 +4233,25 @@ mod tests {
         let out = render_result_block(&huge);
         assert!(out.contains("[truncated]"));
         assert!(out.len() < 8000);
+    }
+
+    #[test]
+    fn render_file_edit_block_emits_parseable_marker() {
+        let diff = chat::diff::compute("a\nb\n", "a\nB\n");
+        let out = render_file_edit_block("src/main.rs", diff, false);
+        // Header the frontend parser keys off, with the +X -Y badge,
+        // status, and a ```diff fence carrying the change.
+        assert!(out.contains("[file edit: src/main.rs | +1 -1 | modified]"));
+        assert!(out.contains("```diff"));
+        assert!(out.contains("-b"));
+        assert!(out.contains("+B"));
+    }
+
+    #[test]
+    fn render_file_edit_block_marks_creations() {
+        let diff = chat::diff::compute("", "hello\n");
+        let out = render_file_edit_block("notes.txt", diff, true);
+        assert!(out.contains("[file edit: notes.txt | +1 -0 | created]"));
     }
 
     #[test]

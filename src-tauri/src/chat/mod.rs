@@ -1,5 +1,6 @@
 //! Conversation + message CRUD. Wraps SQLite via runtime sqlx queries.
 
+pub mod diff;
 pub mod runner;
 
 pub use crate::attachments::Attachment;

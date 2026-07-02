@@ -28,6 +28,7 @@ import {
   type SamplingConfig,
 } from "@/stores/settings";
 import { useSkillsStore } from "@/stores/skills";
+import { useWorkspaceStore } from "@/stores/workspace";
 import {
   SamplingEditor,
   summariseSampling,
@@ -322,6 +323,10 @@ export function ChatView() {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<Attachment[]>([]);
   const [attaching, setAttaching] = useState(false);
+  // Active coding workspace (project root). Shown as a composer chip and
+  // managed from the `+` menu; the agent's `fs.*` tools resolve relative
+  // paths against it.
+  const workspace = useWorkspaceStore((s) => s.workspace);
   // Capability toggles surfaced through the composer `+` menu (and the
   // inline Think toggle). Each preset maps to a flag in `TurnOverrides`
   // that the Rust runner reads off the persisted user message. The
@@ -986,9 +991,11 @@ export function ChatView() {
         </div>
 
         <div className="border-t border-tui-border p-3">
-          {(pending.length > 0 ||
+          {(workspace ||
+            pending.length > 0 ||
             TURN_PRESETS.some((p) => turnPresets.has(p.key))) && (
             <div className="mb-2 flex flex-wrap gap-1.5">
+              {workspace && <WorkspaceChip />}
               {TURN_PRESETS.filter((p) => turnPresets.has(p.key)).map((p) => (
                 <TurnPresetChip
                   key={p.key}
@@ -1477,6 +1484,10 @@ function ChatComposerAddMenu({
 }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const workspace = useWorkspaceStore((s) => s.workspace);
+  const pickWorkspace = useWorkspaceStore((s) => s.pick);
+  const clearWorkspace = useWorkspaceStore((s) => s.clear);
+  const workspaceBusy = useWorkspaceStore((s) => s.busy);
   // The `+` glyph reads as a tiny status indicator too: when any
   // preset is on, the button picks up the accent color so the user
   // can see at a glance that a turn-scoped unlock is active even
@@ -1554,6 +1565,95 @@ function ChatComposerAddMenu({
           onClick={(e) => e.stopPropagation()}
         >
           <ul className="py-1">
+            {/* Workspace (project root) — open / change / close. */}
+            <li className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-tui-fg-muted">
+              Workspace
+            </li>
+            <li>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={workspaceBusy}
+                onClick={() => {
+                  setOpen(false);
+                  void pickWorkspace();
+                }}
+                className={
+                  "flex w-full items-center gap-2.5 px-3 py-2 text-[12px] text-tui-fg " +
+                  "transition-colors duration-150 ease-out " +
+                  "hover:bg-[var(--fluent-bg-subtle-hover)] disabled:opacity-50"
+                }
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="text-tui-fg-muted"
+                >
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+                  {!workspace && <path d="M12 11v4M10 13h4" />}
+                </svg>
+                <span className="flex-1 truncate text-left">
+                  {workspace ? "Change project folder" : "Open project folder"}
+                </span>
+              </button>
+            </li>
+            {workspace && (
+              <li className="px-3 pb-1.5 pt-0.5">
+                <div
+                  className="truncate font-mono text-[10px] text-tui-fg-muted"
+                  title={workspace.path}
+                >
+                  {workspace.name}
+                  {!workspace.exists && (
+                    <span className="text-tui-warn"> (missing)</span>
+                  )}
+                </div>
+              </li>
+            )}
+            {workspace && (
+              <li>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={workspaceBusy}
+                  onClick={() => {
+                    setOpen(false);
+                    void clearWorkspace();
+                  }}
+                  className={
+                    "flex w-full items-center gap-2.5 px-3 py-2 text-[12px] text-tui-fg " +
+                    "transition-colors duration-150 ease-out " +
+                    "hover:bg-[var(--fluent-bg-subtle-hover)] disabled:opacity-50"
+                  }
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-tui-fg-muted"
+                  >
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+                    <path d="m10 12 4 4M14 12l-4 4" />
+                  </svg>
+                  <span className="flex-1 text-left">Close workspace</span>
+                </button>
+              </li>
+            )}
+            <li
+              aria-hidden="true"
+              className="my-1 border-t border-tui-border"
+            />
             <li>
               <button
                 type="button"
@@ -1668,6 +1768,78 @@ function TurnPresetChip({
         onClick={onRemove}
         aria-label={`Disable ${preset.label}`}
         className="-mr-1 rounded-full p-[1px] text-tui-accent/70 hover:bg-[var(--fluent-bg-subtle-hover)] hover:text-tui-accent"
+      >
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+        >
+          <path d="M18 6 6 18M6 6l12 12" />
+        </svg>
+      </button>
+    </span>
+  );
+}
+
+// ─── Workspace chip ( active project root, left of the composer chips ) ───
+//
+// Always visible while a workspace is open so the user can see — and
+// leave — the project the agent is working in. Clicking the name reopens
+// the folder picker (change); the × closes the workspace.
+function WorkspaceChip() {
+  const workspace = useWorkspaceStore((s) => s.workspace);
+  const pick = useWorkspaceStore((s) => s.pick);
+  const clear = useWorkspaceStore((s) => s.clear);
+  const busy = useWorkspaceStore((s) => s.busy);
+  if (!workspace) return null;
+  const missing = !workspace.exists;
+  return (
+    <span
+      className={
+        "inline-flex max-w-[16rem] items-center gap-1.5 rounded-full border px-2 py-[2px] text-[11px] font-medium " +
+        (missing
+          ? "border-tui-warn/40 bg-[var(--fluent-bg-subtle)] text-tui-warn"
+          : "border-tui-border bg-[var(--fluent-bg-subtle)] text-tui-fg-dim")
+      }
+      title={
+        missing
+          ? `Workspace folder not found: ${workspace.path}`
+          : `Workspace: ${workspace.path}`
+      }
+    >
+      <svg
+        width="11"
+        height="11"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        className="shrink-0"
+      >
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+      </svg>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void pick()}
+        className="truncate font-mono hover:text-tui-fg disabled:opacity-50"
+      >
+        {workspace.name}
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void clear()}
+        aria-label="Close workspace"
+        title="Close workspace"
+        className="-mr-1 rounded-full p-[1px] text-tui-fg-muted hover:bg-[var(--fluent-bg-subtle-hover)] hover:text-tui-fg disabled:opacity-50"
       >
         <svg
           width="10"
@@ -3103,7 +3275,15 @@ type Segment =
   | { kind: "text"; text: string }
   | { kind: "call"; server: string; tool: string; args: string }
   | { kind: "result"; body: string }
-  | { kind: "thinking"; body: string };
+  | { kind: "thinking"; body: string }
+  | {
+      kind: "fileedit";
+      path: string;
+      added: number;
+      removed: number;
+      status: string;
+      body: string;
+    };
 
 /**
  * Split assistant text into a sequence of text / tool-call / tool-result
@@ -3119,18 +3299,21 @@ function parseAssistantContent(text: string): Segment[] {
     const callIdx = text.indexOf("[tool call:", cursor);
     const resultIdx = text.indexOf("[tool result]", cursor);
     const thinkIdx = text.indexOf("[thinking]", cursor);
+    const fileEditIdx = text.indexOf("[file edit:", cursor);
     // Pick whichever marker comes first; ties are broken by the natural
     // order they're checked in (matches the runner's own emission order:
-    // thinking → tool call → tool result).
-    let kind: "call" | "result" | "thinking" | null = null;
+    // thinking → tool call → tool result / file edit).
+    let kind: "call" | "result" | "thinking" | "fileedit" | null = null;
     let idx = -1;
     const candidates: Array<{
-      kind: "call" | "result" | "thinking";
+      kind: "call" | "result" | "thinking" | "fileedit";
       idx: number;
     }> = [];
     if (callIdx !== -1) candidates.push({ kind: "call", idx: callIdx });
     if (resultIdx !== -1) candidates.push({ kind: "result", idx: resultIdx });
     if (thinkIdx !== -1) candidates.push({ kind: "thinking", idx: thinkIdx });
+    if (fileEditIdx !== -1)
+      candidates.push({ kind: "fileedit", idx: fileEditIdx });
     for (const c of candidates) {
       if (idx === -1 || c.idx < idx) {
         idx = c.idx;
@@ -3187,7 +3370,7 @@ function parseAssistantContent(text: string): Segment[] {
           : text.slice(bodyStart, fenceClose);
       segments.push({ kind: "result", body });
       cursor = fenceClose === -1 ? text.length : fenceClose + "\n```".length;
-    } else {
+    } else if (kind === "thinking") {
       // thinking — `[thinking]\n…\n[/thinking]`. While the round is
       // still streaming we won't have seen the closing tag yet; render
       // the partial body so the user can read the reasoning live.
@@ -3199,6 +3382,48 @@ function parseAssistantContent(text: string): Segment[] {
           : text.slice(bodyStart, close).replace(/^\n/, "").replace(/\n+$/, "");
       segments.push({ kind: "thinking", body });
       cursor = close === -1 ? text.length : close + "[/thinking]".length;
+    } else {
+      // file edit — `[file edit: <path> | +A -R | <status>]` followed by a
+      // ```diff fence. Emitted by the runner after a successful
+      // `fs.write` / `fs.edit`; rendered as an expandable diff card.
+      const closeBracket = text.indexOf("]", idx);
+      if (closeBracket === -1) {
+        segments.push({ kind: "text", text: text.slice(idx) });
+        break;
+      }
+      const header = text.slice(idx + "[file edit: ".length, closeBracket);
+      // Format: "<path> | +A -R | <status>". Split on the exact " | "
+      // separator the runner uses so paths containing spaces survive.
+      const segs = header.split(" | ");
+      const path = segs[0] ?? "";
+      const stats = segs[1] ?? "";
+      const status = segs[2] ?? "";
+      const added = Number(stats.match(/\+(\d+)/)?.[1] ?? 0);
+      const removed = Number(stats.match(/-(\d+)/)?.[1] ?? 0);
+
+      const fenceOpen = text.indexOf("```diff\n", closeBracket);
+      if (fenceOpen === -1) {
+        // Header arrived but body hasn't streamed yet — show the card
+        // with just the badges so the change registers immediately.
+        segments.push({
+          kind: "fileedit",
+          path,
+          added,
+          removed,
+          status,
+          body: "",
+        });
+        cursor = closeBracket + 1;
+        continue;
+      }
+      const bodyStart = fenceOpen + "```diff\n".length;
+      const fenceClose = text.indexOf("\n```", bodyStart);
+      const body =
+        fenceClose === -1
+          ? text.slice(bodyStart)
+          : text.slice(bodyStart, fenceClose);
+      segments.push({ kind: "fileedit", path, added, removed, status, body });
+      cursor = fenceClose === -1 ? text.length : fenceClose + "\n```".length;
     }
   }
   // Merge adjacent text segments so we don't render a useless extra <div>
@@ -3234,6 +3459,7 @@ function AssistantContent({ text }: { text: string }) {
         const prev = i > 0 ? segments[i - 1] : null;
         const flushWithPrev =
           (s.kind === "result" && prev?.kind === "call") ||
+          (s.kind === "fileedit" && prev?.kind === "call") ||
           (s.kind === "call" && prev?.kind === "call");
         const pairClass = flushWithPrev ? "-mt-1" : "";
         if (s.kind === "thinking") {
@@ -3267,6 +3493,9 @@ function AssistantContent({ text }: { text: string }) {
               </div>
             </details>
           );
+        }
+        if (s.kind === "fileedit") {
+          return <FileEditCard key={i} seg={s} pairClass={pairClass} />;
         }
         if (s.kind === "call") {
           return (
@@ -3330,6 +3559,104 @@ function AssistantContent({ text }: { text: string }) {
           </details>
         );
       })}
+    </div>
+  );
+}
+
+// ─── File-edit diff card ───────────────────────────────────────────────
+//
+// Rendered for the `[file edit: …]` marker the runner emits after a
+// successful `fs.write` / `fs.edit`. Collapsed by default showing the
+// path and a `+adds −removes` tally; expand to see the unified diff with
+// per-line coloring — the way CLI coding agents surface a change.
+
+type FileEditSegment = Extract<Segment, { kind: "fileedit" }>;
+
+function FileEditCard({
+  seg,
+  pairClass,
+}: {
+  seg: FileEditSegment;
+  pairClass: string;
+}) {
+  const noChange = seg.added === 0 && seg.removed === 0;
+  return (
+    <details
+      className={`overflow-hidden rounded-md border border-tui-border bg-[var(--fluent-bg-subtle)] text-[12px] ${pairClass}`}
+    >
+      <summary className="flex cursor-pointer select-none items-center gap-2 px-2 py-1 hover:bg-[var(--fluent-bg-subtle-hover)]">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.75"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="shrink-0 text-tui-fg-muted"
+          aria-hidden="true"
+        >
+          <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+          <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2Z" />
+          <path d="m12 11-2 2 2 2" />
+          <path d="m15 11 2 2-2 2" />
+        </svg>
+        <span
+          className="truncate font-mono text-[11px] text-tui-fg"
+          title={seg.path}
+        >
+          {seg.path}
+        </span>
+        {seg.status && (
+          <span className="shrink-0 rounded-[3px] border border-tui-border px-1 text-[10px] uppercase tracking-wide text-tui-fg-muted">
+            {seg.status}
+          </span>
+        )}
+        <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[11px]">
+          {noChange ? (
+            <span className="text-tui-fg-muted">no change</span>
+          ) : (
+            <>
+              {seg.added > 0 && (
+                <span className="text-tui-ok">+{seg.added}</span>
+              )}
+              {seg.removed > 0 && (
+                <span className="text-tui-err">-{seg.removed}</span>
+              )}
+            </>
+          )}
+        </span>
+      </summary>
+      {seg.body && <DiffBody body={seg.body} />}
+    </details>
+  );
+}
+
+function DiffBody({ body }: { body: string }) {
+  const lines = body.split("\n");
+  return (
+    <div className="overflow-x-auto border-t border-tui-border">
+      <div className="w-max min-w-full py-1 font-mono text-[11px] leading-[1.55]">
+        {lines.map((line, i) => {
+          const first = line[0] ?? "";
+          let cls = "text-tui-fg-dim";
+          if (line.startsWith("[diff truncated]")) {
+            cls = "italic text-tui-fg-muted";
+          } else if (first === "+") {
+            cls = "bg-emerald-500/10 text-tui-ok";
+          } else if (first === "-") {
+            cls = "bg-red-500/10 text-tui-err";
+          } else if (first === "@") {
+            cls = "text-tui-accent";
+          }
+          return (
+            <div key={i} className={`whitespace-pre px-3 ${cls}`}>
+              {line === "" ? " " : line}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

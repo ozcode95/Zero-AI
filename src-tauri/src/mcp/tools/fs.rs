@@ -588,8 +588,10 @@ impl Tool for FsWrite {
 
 /// Turn a user-supplied string into an absolute [`PathBuf`].
 ///
-/// - Expands a leading `~` / `~/` / `~\\` to the user's home directory.
-/// - Resolves relative paths against the current working directory.
+/// - Expands a leading `~` / `~/` / `~\` to the user's home directory.
+/// - Resolves relative paths against the active workspace root when one is
+///   open (see [`crate::workspace`]), otherwise against the current working
+///   directory.
 /// - Does **not** canonicalise — symlinks are preserved as written so a
 ///   `fs.list` of a symlinked directory returns its actual contents
 ///   without surprising the user.
@@ -612,6 +614,10 @@ pub(crate) fn resolve_path(raw: &str) -> Result<PathBuf> {
 
     if expanded.is_absolute() {
         Ok(expanded)
+    } else if let Some(root) = crate::workspace::get() {
+        // A workspace is open: relative paths resolve against the project
+        // root so the agent can use project-relative paths (`src/main.rs`).
+        Ok(root.join(expanded))
     } else {
         let cwd = std::env::current_dir().context("fs: read current dir for relative path")?;
         Ok(cwd.join(expanded))

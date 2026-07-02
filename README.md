@@ -53,7 +53,6 @@ Hardware-aware recommendations rank models by **memory fit** and **estimated tok
 - **Memory** — short-term and long-term persistent memory
 - **Voice** — speech-to-text via `whisper.cpp` and text-to-speech via `llama-tts`
 - **Scheduler** — cron, interval, and click-to-run agent tasks
-- **Other providers** — point at ollama or any OpenAI-compatible endpoint; same chat UI, different base URL
 
 ## Screenshots
 

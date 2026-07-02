@@ -224,6 +224,13 @@ export interface Settings {
    * of quitting the app.
    */
   close_to_taskbar: boolean;
+  /**
+   * Absolute path to the active coding workspace (project root), or `null`
+   * when none is open. Managed through the dedicated `workspace_*` IPC
+   * commands (and the workspace store) rather than the Settings page, but
+   * lives here so it round-trips with the rest of the settings file.
+   */
+  workspace_root: string | null;
 }
 
 interface SettingsState extends Settings {
@@ -303,6 +310,7 @@ const DEFAULTS: Settings = {
   autostart_enabled: false,
   minimize_on_startup: false,
   close_to_taskbar: false,
+  workspace_root: null,
 };
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({

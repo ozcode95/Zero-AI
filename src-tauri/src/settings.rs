@@ -412,6 +412,13 @@ pub struct Settings {
     /// of quitting the app.
     #[serde(default)]
     pub close_to_taskbar: bool,
+    /// Absolute path to the active coding workspace (project root), if the
+    /// user has opened one. The built-in `fs.*` tools resolve relative
+    /// paths against it, the chat runner renders file edits relative to it,
+    /// and the system prompt tells the model where the project lives.
+    /// `None` (the default) means no workspace is open.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -463,6 +470,7 @@ impl Default for Settings {
             autostart_enabled: false,
             minimize_on_startup: false,
             close_to_taskbar: false,
+            workspace_root: None,
         }
     }
 }

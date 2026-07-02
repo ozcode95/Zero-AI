@@ -27,6 +27,7 @@ pub mod state;
 pub mod system;
 pub mod tasks;
 pub mod whisper;
+pub mod workspace;
 
 use crate::state::AppState;
 use std::sync::Arc;
@@ -65,6 +66,10 @@ pub fn run() {
             commands::settings::settings_save,
             commands::settings::settings_set_hf_token,
             commands::settings::settings_clear_hf_token,
+            // ─── workspace (project root) ─────────────────────────────
+            commands::workspace::workspace_get,
+            commands::workspace::workspace_set,
+            commands::workspace::workspace_clear,
             // ─── chat ─────────────────────────────────────────────────
             commands::chat::chat_list_conversations,
             commands::chat::chat_list_messages,

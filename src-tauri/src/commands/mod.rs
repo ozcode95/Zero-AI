@@ -14,3 +14,4 @@ pub mod settings;
 pub mod skills;
 pub mod system;
 pub mod tasks;
+pub mod workspace;

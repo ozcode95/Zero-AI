@@ -204,6 +204,16 @@ impl AppState {
         // flash visible for a frame before minimizing, an acceptable
         // trade for not blocking startup on a disk read.
         if let Ok(settings) = crate::settings::Settings::load().await {
+            // Hydrate the process-global workspace cache so the built-in
+            // `fs.*` tools resolve relative paths against the user's open
+            // project from the very first turn.
+            crate::workspace::set(
+                settings
+                    .workspace_root
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(std::path::PathBuf::from),
+            );
             if settings.minimize_on_startup {
                 if let Some(win) = app.get_webview_window("main") {
                     if let Err(e) = win.minimize() {
