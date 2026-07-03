@@ -120,9 +120,11 @@ impl LlamaVariant {
     /// Asset matcher for the upstream release asset list. We look for the
     /// canonical filename shape `llama-<build>-bin-win-<flavour>-x64.zip`.
     ///
-    /// The CUDA matcher specifically picks the `cuda-12.4` flavour over
-    /// `cuda-13.3`: 12.4 has wider driver compatibility, and the perf gap
-    /// between the two builds is negligible for consumer GPUs.
+    /// The CUDA matcher targets `cuda-12.4` as the **safe fallback**. The
+    /// install pipeline in `install.rs` probes the host's NVIDIA driver version
+    /// via `system::Specs::cuda_version_major` and prefers a `cuda-13.x` asset
+    /// first when the driver supports it, only reaching this matcher as a
+    /// fallback when no cuda-13.x build ships in the current release.
     ///
     /// We anchor on the `llama-` filename prefix so the matcher does
     /// **not** accept companion archives that share the same flavour

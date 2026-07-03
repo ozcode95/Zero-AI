@@ -5,7 +5,6 @@
 //! just point at a different base URL.
 
 pub mod llamacpp;
-pub mod ollama;
 pub mod openai_compat;
 
 use async_trait::async_trait;

@@ -1,10 +1,15 @@
 //! Hardware / OS probe. Cached to `system.json` so we don't pay the WMI cost
 //! on every launch — re-probe is opt-in.
+//!
+//! GPU/VRAM detection is delegated to llmfit-core's `SystemSpecs::detect()`,
+//! which already calls nvidia-smi, rocm-smi, wmic, and Vulkan internally.
+//! This removes the need for the `wmi` and `windows` crate dependencies.
 
 pub mod recommend;
 
 use anyhow::Result;
 use chrono::Utc;
+use llmfit_core::hardware::{GpuBackend, SystemSpecs as LlmSpecs};
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
 
@@ -45,6 +50,13 @@ pub struct Specs {
     pub gpus: Vec<GpuInfo>,
     pub npus: Vec<NpuInfo>,
     pub probed_at: String,
+    /// Maximum CUDA version major supported by the installed NVIDIA driver
+    /// (e.g. `13` for CUDA 13.x, `12` for CUDA 12.x). `None` when no NVIDIA
+    /// GPU is detected or when `nvidia-smi` cannot be queried.
+    /// `#[serde(default)]` ensures older cached `system.json` files without
+    /// this field deserialise cleanly as `None`.
+    #[serde(default)]
+    pub cuda_version_major: Option<u32>,
 }
 
 pub fn load_cached() -> Option<Specs> {
@@ -89,7 +101,33 @@ pub fn probe() -> Result<Specs> {
     let logical_cores = cpus.len();
     let physical_cores = sys.physical_core_count().unwrap_or(logical_cores);
 
-    let (gpus, npus) = platform_accelerators();
+    // Delegate GPU/VRAM detection to llmfit-core. It already handles:
+    //   - NVIDIA: nvidia-smi (accurate 64-bit VRAM, multi-GPU, unified memory)
+    //   - AMD:    rocm-smi + sysfs fallback
+    //   - Windows: wmic (no extra crate needed)
+    //   - Intel Arc: sysfs
+    //   - Apple Silicon: unified memory
+    // `prefer_discrete_gpus()` inside llmfit filters out iGPUs when a dGPU
+    // is present, so every entry here is effectively a discrete accelerator.
+    let llm_specs = LlmSpecs::detect();
+    let gpus: Vec<GpuInfo> = llm_specs
+        .gpus
+        .iter()
+        .map(|g| GpuInfo {
+            name: g.name.clone(),
+            vendor: backend_to_vendor(g.backend, &g.name),
+            vram_mb: g.vram_gb.map(|v| (v * 1024.0) as u64),
+            kind: GpuKind::Discrete,
+        })
+        .collect();
+
+    // Detect the maximum CUDA version the NVIDIA driver supports. Used at
+    // install time to choose between cuda-13.x and cuda-12.4 llama.cpp assets.
+    let cuda_version_major = if llm_specs.gpus.iter().any(|g| g.backend == GpuBackend::Cuda) {
+        detect_cuda_version_major()
+    } else {
+        None
+    };
 
     Ok(Specs {
         os: System::name().unwrap_or_else(|| "unknown".into()),
@@ -101,135 +139,61 @@ pub fn probe() -> Result<Specs> {
         cpu_logical_cores: logical_cores,
         ram_total_mb: sys.total_memory() / 1024 / 1024,
         gpus,
-        npus,
+        npus: Vec::new(), // Intel NPU (AI Boost) was detected via WMI; not available through llmfit
         probed_at: Utc::now().to_rfc3339(),
+        cuda_version_major,
     })
 }
 
-// ─── platform-specific GPU/NPU enumeration ──────────────────────────────────
-
-#[cfg(target_os = "windows")]
-fn platform_accelerators() -> (Vec<GpuInfo>, Vec<NpuInfo>) {
-    win::enumerate().unwrap_or_default()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn platform_accelerators() -> (Vec<GpuInfo>, Vec<NpuInfo>) {
-    // TODO: implement Linux (sysfs / lspci) + macOS (system_profiler) probes.
-    (Vec::new(), Vec::new())
-}
-
-#[cfg(target_os = "windows")]
-mod win {
-    use super::*;
-    use serde::Deserialize;
-    use wmi::{COMLibrary, WMIConnection};
-
-    #[derive(Deserialize, Debug)]
-    #[serde(rename = "Win32_VideoController")]
-    #[serde(rename_all = "PascalCase")]
-    struct VideoController {
-        name: Option<String>,
-        adapter_compatibility: Option<String>,
+/// Query `nvidia-smi` to find the maximum CUDA version the installed NVIDIA
+/// driver supports. Returns the major version number (e.g. `13` for CUDA 13.5,
+/// `12` for CUDA 12.4). Returns `None` when `nvidia-smi` is not available or
+/// does not report a parseable CUDA version line.
+fn detect_cuda_version_major() -> Option<u32> {
+    let output = std::process::Command::new("nvidia-smi").output().ok()?;
+    if !output.status.success() {
+        return None;
     }
-
-    pub fn enumerate() -> anyhow::Result<(Vec<GpuInfo>, Vec<NpuInfo>)> {
-        let com = COMLibrary::new()?;
-        let wmi = WMIConnection::new(com)?;
-        let rows: Vec<VideoController> = wmi.query()?;
-
-        // Fetch real VRAM via DXGI — WMI's `AdapterRAM` is a u32 that
-        // overflows for cards >4 GB (e.g. RTX 4070 12 GB truncates to 0).
-        let vram_map = dxgi_vram_map()?;
-
-        let mut gpus = Vec::new();
-        let mut npus = Vec::new();
-        for r in rows {
-            let name = r.name.unwrap_or_default();
-            let vendor = r.adapter_compatibility.unwrap_or_default();
-            let lname = name.to_lowercase();
-            let vendor_l = vendor.to_lowercase();
-
-            // Intel NPU surfaces as "Intel(R) AI Boost" on Meteor/Lunar Lake.
-            if lname.contains("ai boost") || lname.contains("npu") {
-                npus.push(NpuInfo { name, vendor });
-                continue;
+    let text = String::from_utf8(output.stdout).ok()?;
+    // The nvidia-smi header contains a line like:
+    //   "| NVIDIA-SMI 576.52   Driver Version: 576.52   CUDA Version: 13.5     |"
+    for line in text.lines() {
+        if let Some(pos) = line.find("CUDA Version:") {
+            let rest = line[pos + "CUDA Version:".len()..].trim();
+            // Take the first whitespace-delimited token (strips trailing pipe/spaces)
+            let version_str = rest.split_whitespace().next().unwrap_or("");
+            let major_str = version_str.split('.').next().unwrap_or("");
+            if let Ok(major) = major_str.parse::<u32>() {
+                return Some(major);
             }
+        }
+    }
+    None
+}
 
-            let kind = if vendor_l.contains("nvidia") || lname.contains("radeon rx") {
-                GpuKind::Discrete
-            } else if vendor_l.contains("intel") || lname.contains("uhd") || lname.contains("iris")
-            {
-                GpuKind::Integrated
+/// Derive a vendor string from llmfit's [`GpuBackend`] tag and the GPU name.
+/// llmfit doesn't expose a separate vendor field, so we infer it.
+fn backend_to_vendor(backend: GpuBackend, name: &str) -> String {
+    let n = name.to_lowercase();
+    match backend {
+        GpuBackend::Cuda => "NVIDIA".to_string(),
+        GpuBackend::Rocm => "Advanced Micro Devices".to_string(),
+        GpuBackend::Vulkan => {
+            if n.contains("nvidia") {
+                "NVIDIA".to_string()
+            } else if n.contains("amd") || n.contains("radeon") {
+                "Advanced Micro Devices".to_string()
+            } else if n.contains("intel") {
+                "Intel".to_string()
             } else {
-                GpuKind::Unknown
-            };
-
-            // Match WMI entry → DXGI adapter by name substring.
-            // DXGI names are typically longer (e.g. "NVIDIA GeForce RTX 4070")
-            // so we do a bidirectional contains check.
-            let vram_mb = vram_map
-                .iter()
-                .find(|(dxgi_name, _)| {
-                    name.len() > 3
-                        && dxgi_name.len() > 3
-                        && (dxgi_name.contains(&name) || name.contains(dxgi_name.as_str()))
-                })
-                .map(|(_, mb)| *mb);
-
-            // Integrated GPUs don't have meaningful *dedicated* VRAM —
-            // they share system RAM. DXGI reports ~0 for dedicated on
-            // iGPUs, which is correct. Keep the field as None so the
-            // recommendation engine falls back to system RAM budget.
-            let vram_mb = match kind {
-                GpuKind::Integrated => None,
-                _ => vram_mb.filter(|&mb| mb > 64), // sanity floor: 64 MB
-            };
-
-            gpus.push(GpuInfo {
-                name,
-                vendor,
-                vram_mb,
-                kind,
-            });
-        }
-        Ok((gpus, npus))
-    }
-
-    /// Enumerate GPUs via DXGI and return a `(adapter_name, dedicated_vram_mb)`
-    /// map. DXGI reports correct 64‑bit VRAM; WMI's `AdapterRAM` u32 overflows
-    /// for cards >4 GB.
-    fn dxgi_vram_map() -> anyhow::Result<Vec<(String, u64)>> {
-        use windows::Win32::Graphics::Dxgi::{
-            CreateDXGIFactory1, IDXGIFactory1, DXGI_ERROR_NOT_FOUND,
-        };
-
-        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
-            .map_err(|e| anyhow::anyhow!("CreateDXGIFactory1: {e}"))?;
-
-        let mut out = Vec::new();
-        for i in 0u32.. {
-            let adapter = unsafe { factory.EnumAdapters1(i) };
-            if let Err(ref e) = adapter {
-                if e.code() == DXGI_ERROR_NOT_FOUND {
-                    break;
-                }
-                // Skip adapters we can't query (e.g. software renderers).
-                continue;
+                name.to_string()
             }
-            let adapter = adapter.unwrap();
-
-            let desc = unsafe { adapter.GetDesc1() }.unwrap_or_default();
-            let name = String::from_utf16_lossy(&desc.Description)
-                .trim_end_matches('\0')
-                .to_string();
-            // `DedicatedVideoMemory` is a SIZE_T (usize on this target).
-            // DXGI reports the real value even for >4 GB cards unlike
-            // WMI's `AdapterRAM` u32.
-            let vram_mb = desc.DedicatedVideoMemory as u64 / (1024 * 1024);
-
-            out.push((name, vram_mb));
         }
-        Ok(out)
+        GpuBackend::Sycl => "Intel".to_string(),
+        GpuBackend::Metal => "Apple".to_string(),
+        GpuBackend::Ascend => "Huawei".to_string(),
+        GpuBackend::CpuX86 | GpuBackend::CpuArm => String::new(),
     }
 }
+
+

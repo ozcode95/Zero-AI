@@ -39,12 +39,7 @@ const DEFAULT_DEFAULTS: ModelSamplingDefaults = {
 };
 
 function isGemma4Family(model: string): boolean {
-  const lower = model.toLowerCase();
-  return (
-    lower.includes("gemma-4") ||
-    lower.includes("gemma4") ||
-    lower.includes("gemma_4")
-  );
+  return /gemma[-_]?4/i.test(model);
 }
 
 /**

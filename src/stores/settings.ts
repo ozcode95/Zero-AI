@@ -178,19 +178,12 @@ export interface Settings {
   thinking_enabled: boolean;
   agent_max_iterations: number;
   destructive_tool_confirm: boolean;
-  ovms: OvmsSettings;
   llama: LlamaSettings;
   /** Speech-to-text / text-to-speech capabilities. Off by default. */
   audio: AudioSettings;
   /** Document-grounding ("embedding") feature. Off by default. */
   embedding: EmbeddingSettings;
-  /** Auto-install OVMS on startup and auto-start the default model if it's already downloaded. */
-  auto_provision_ovms: boolean;
-  /**
-   * Same idea as `auto_provision_ovms` but for the llama.cpp runtime.
-   * Off by default so a brand-new install only ends up with OVMS unless
-   * the user explicitly opts in.
-   */
+  /** Auto-install llama.cpp on startup and start the highest-priority variant. */
   auto_provision_llama: boolean;
   /** Folder names under `~/.zero/skills/` to inject into the system prompt. */
   skills_enabled: string[];
@@ -257,19 +250,6 @@ const DEFAULTS: Settings = {
   thinking_enabled: true,
   agent_max_iterations: 8,
   destructive_tool_confirm: true,
-  ovms: {
-    rest_port: 8000,
-    // 0 disables OVMS's gRPC interface. zero only talks REST, so we leave
-    // gRPC off by default to avoid port collisions on 9000.
-    grpc_port: 0,
-    device: "GPU",
-    log_level: null,
-    log_path: null,
-    cache_dir: null,
-    allowed_origins: null,
-    api_key_file: null,
-    extra_args: [],
-  },
   llama: {
     host: "127.0.0.1",
     n_gpu_layers: -1,
@@ -289,7 +269,6 @@ const DEFAULTS: Settings = {
     enabled: false,
     documents_disabled: [],
   },
-  auto_provision_ovms: false,
   auto_provision_llama: true,
   skills_enabled: [],
   // Default to a conservative built-in tool surface: filesystem mutation

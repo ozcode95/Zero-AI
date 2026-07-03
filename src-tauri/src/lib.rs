@@ -5,7 +5,6 @@
 
 #![allow(clippy::needless_return)]
 
-pub mod agent;
 pub mod attachments;
 pub mod chat;
 pub mod commands;

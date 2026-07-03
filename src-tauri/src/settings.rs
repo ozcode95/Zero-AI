@@ -104,72 +104,6 @@ fn default_mcp_transport() -> String {
     "http".into()
 }
 
-/// Legacy OVMS settings preserved for backward compatibility with existing
-/// `settings.json` files. No longer functional — OVMS has been removed in
-/// favour of the multi-variant llama.cpp orchestrator. The fields are kept
-/// so deserialization doesn't break on upgrade.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OvmsSettings {
-    pub rest_port: u16,
-    /// gRPC bind port. `0` disables the gRPC server entirely (OVMS's
-    /// documented way to opt out). zero talks to OVMS over REST only, so
-    /// the default is `0` to avoid pointlessly grabbing a port (and the
-    /// `WSAEADDRINUSE` failures that come with it when something else is
-    /// already bound on 9000). Users who need gRPC for other clients can
-    /// set this to a free port from the Settings UI.
-    pub grpc_port: u16,
-    /// One of `CPU`, `GPU`, `NPU`, `AUTO`. Free-form so future OpenVINO
-    /// devices (`MULTI:CPU,GPU`, `HETERO:GPU,CPU`, ...) can be entered directly.
-    pub device: String,
-
-    // ─── advanced server-side knobs (all optional) ─────────────────────
-    /// `DEBUG` / `INFO` / `ERROR`. `None` keeps the OVMS default (INFO).
-    /// Mapped to `--log_level`.
-    #[serde(default)]
-    pub log_level: Option<String>,
-    /// Optional path to a log file. Mapped to `--log_path`.
-    #[serde(default)]
-    pub log_path: Option<String>,
-    /// Optional model compilation cache directory. Big startup speedup on
-    /// subsequent runs. Mapped to `--cache_dir`.
-    #[serde(default)]
-    pub cache_dir: Option<String>,
-    /// CORS `Access-Control-Allow-Origin`. Mapped to `--allowed_origins`.
-    #[serde(default)]
-    pub allowed_origins: Option<String>,
-    /// Path to a file whose first line holds the API key required on
-    /// `/v3/*` endpoints. Mapped to `--api_key_file`.
-    #[serde(default)]
-    pub api_key_file: Option<String>,
-    /// Escape hatch for any flag we don't model explicitly. Each entry is
-    /// forwarded verbatim as a separate `argv` token — the UI splits the
-    /// user's textarea on newlines so multi-token flags become two entries
-    /// (`--grpc_workers` then `4`).
-    #[serde(default)]
-    pub extra_args: Vec<String>,
-}
-
-impl Default for OvmsSettings {
-    fn default() -> Self {
-        Self {
-            rest_port: 8000,
-            grpc_port: 0,
-            device: "GPU".into(),
-            log_level: None,
-            log_path: None,
-            cache_dir: None,
-            allowed_origins: None,
-            api_key_file: None,
-            extra_args: Vec::new(),
-        }
-    }
-}
-
-impl OvmsSettings {
-    // No methods — OVMS has been removed. The struct is kept for
-    // backward-compatible deserialization of existing settings.json files.
-}
-
 /// User-visible knobs for the bundled `llama-server` runtime.
 /// llama-server takes its model as a positional `--model <path>` arg
 /// (rather than a multi-model config file), so the only state we need
@@ -350,8 +284,6 @@ pub struct Settings {
     pub thinking_enabled: bool,
     pub agent_max_iterations: u32,
     pub destructive_tool_confirm: bool,
-    #[serde(default)]
-    pub ovms: OvmsSettings,
     /// User-visible knobs for the bundled `llama-server` runtime.
     /// Defaults so existing `settings.json` files (which predate the
     /// field) keep deserialising without migration.
@@ -364,10 +296,6 @@ pub struct Settings {
     /// the Embedding page once an embedding model is installed.
     #[serde(default)]
     pub embedding: EmbeddingSettings,
-    /// Legacy — preserved for backward-compatible deserialization.
-    /// No longer functional; OVMS has been removed.
-    #[serde(default = "default_true")]
-    pub auto_provision_ovms: bool,
     /// When true (the default), startup will install the applicable
     /// llama.cpp variant(s) and start the highest-priority one.
     /// Overridden when a discrete GPU is detected (always installs).
@@ -444,11 +372,9 @@ impl Default for Settings {
             thinking_enabled: true,
             agent_max_iterations: 8,
             destructive_tool_confirm: true,
-            ovms: OvmsSettings::default(),
             llama: LlamaSettings::default(),
             audio: AudioSettings::default(),
             embedding: EmbeddingSettings::default(),
-            auto_provision_ovms: false,
             auto_provision_llama: true,
             skills_enabled: Vec::new(),
             // Conservative built-in surface for fresh installs: filesystem

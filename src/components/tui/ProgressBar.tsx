@@ -3,8 +3,6 @@ import { clamp } from "@/lib/format";
 interface ProgressBarProps {
   value: number;
   max?: number;
-  /** Ignored; retained for source-compat with the previous TUI version. */
-  width?: number;
   label?: string;
   tone?: "default" | "ok" | "warn" | "err";
 }

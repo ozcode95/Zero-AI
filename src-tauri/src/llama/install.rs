@@ -85,30 +85,71 @@ pub async fn install_variant(
         .await
         .context("fetch latest release")?;
 
-    let asset = release
-        .find_asset(|name| variant.matches_asset(name))
-        .ok_or_else(|| {
-            anyhow!(
-                "no matching asset for variant `{}` in release {} (available: {})",
-                variant.slug(),
-                release.tag_name,
-                release
-                    .assets
-                    .iter()
-                    .map(|a| a.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?
-        .clone();
+    // Determine the highest CUDA version the host's NVIDIA driver supports
+    // (stored by the hardware probe in system.json). When the driver supports
+    // CUDA 13+, prefer the cuda-13.x asset; fall back to cuda-12.4 when no
+    // cuda-13.x build ships in the current release or the driver is older.
+    let cuda_major = if variant == LlamaVariant::Cuda {
+        crate::system::load_cached().and_then(|s| s.cuda_version_major)
+    } else {
+        None
+    };
+    let prefer_cuda13 = cuda_major.map_or(false, |m| m >= 13);
 
-    // The CUDA build needs its companion redistributable.
-    let companion = release
-        .find_asset(|name| variant.matches_companion_asset(name))
-        .cloned();
-    if companion.is_none()
-        && variant.matches_companion_asset("cudart-llama-bin-win-cuda-12.4-x64.zip")
-    {
+    let asset = {
+        let found = if prefer_cuda13 {
+            // Prefer any cuda-13.x asset (exact minor varies by release),
+            // then fall back to cuda-12.4 if none ships yet.
+            release
+                .find_asset(|name| {
+                    let n = name.to_lowercase();
+                    n.starts_with("llama-")
+                        && n.contains("-bin-win-")
+                        && n.contains("cuda-13.")
+                        && n.contains("x64")
+                        && n.ends_with(".zip")
+                })
+                .or_else(|| release.find_asset(|name| variant.matches_asset(name)))
+        } else {
+            release.find_asset(|name| variant.matches_asset(name))
+        };
+        found
+            .ok_or_else(|| {
+                anyhow!(
+                    "no matching asset for variant `{}` in release {} (available: {})",
+                    variant.slug(),
+                    release.tag_name,
+                    release
+                        .assets
+                        .iter()
+                        .map(|a| a.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?
+            .clone()
+    };
+
+    // The CUDA build needs its companion redistributable (cudart DLLs).
+    let companion = if prefer_cuda13 {
+        // Prefer the cuda-13.x redistributable; fall back to cuda-12.4.
+        release
+            .find_asset(|name| {
+                let n = name.to_lowercase();
+                n.starts_with("cudart-")
+                    && n.contains("-bin-win-")
+                    && n.contains("cuda-13.")
+                    && n.contains("x64")
+                    && n.ends_with(".zip")
+            })
+            .or_else(|| release.find_asset(|name| variant.matches_companion_asset(name)))
+            .cloned()
+    } else {
+        release
+            .find_asset(|name| variant.matches_companion_asset(name))
+            .cloned()
+    };
+    if companion.is_none() && variant == LlamaVariant::Cuda {
         tracing::warn!(
             "llama.cpp install: variant `{}` expects a companion redistributable but none was found in release {}",
             variant.slug(),
