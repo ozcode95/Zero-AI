@@ -242,6 +242,13 @@ pub fn attachments_dir() -> Result<PathBuf> {
     Ok(p)
 }
 
+/// Global user-level `AGENTS.md` (mirrors Claude Code's `~/.claude/CLAUDE.md`).
+/// Injected into the system prompt on every chat turn by `agents_md::load`.
+/// Best-effort: a missing file is normal (most users never author one).
+pub fn agents_md_global() -> Result<PathBuf> {
+    Ok(root()?.join("AGENTS.md"))
+}
+
 /// User-authored skills live under `<root>/skills/<skill_id>/SKILL.md`.
 /// Mirrors the layout used by Anthropic-style agent skills so packs can be
 /// dropped in by hand and picked up on next list.
@@ -260,4 +267,16 @@ pub fn documents_dir() -> Result<PathBuf> {
     let p = root()?.join("documents");
     std::fs::create_dir_all(&p)?;
     Ok(p)
+}
+
+/// Optional project-level hooks config, living at
+/// `<workspace_root>/.zero/hooks.json`. Returns the path for a given
+/// workspace root; existence is decided by the caller. `None` here when
+/// `root` is empty so we never end up materialising a `.zero/hooks.json`
+/// at the filesystem root accidentally.
+pub fn hooks_project_file(workspace_root: &Path) -> Option<PathBuf> {
+    if workspace_root.as_os_str().is_empty() {
+        return None;
+    }
+    Some(workspace_root.join(".zero").join("hooks.json"))
 }

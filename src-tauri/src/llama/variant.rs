@@ -290,6 +290,7 @@ mod tests {
             gpus,
             npus: Vec::new(),
             probed_at: "now".into(),
+            cuda_version_major: None,
         }
     }
 

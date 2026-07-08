@@ -21,6 +21,17 @@ use std::sync::RwLock;
 
 static ROOT: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
 
+/// Serialises every `#[test]` / `#[tokio::test]` that mutates or reads the
+/// process-global [`ROOT`] cache so tests across the crate that depend on
+/// the workspace state (agents_md loader, hooks resolver,
+/// `commands::agents_md`, this module's round-trip test) can't race
+/// each other. Async tests that hold this guard across `.await` must use
+/// `#[tokio::test(flavor = "current_thread")]` so the future need not be
+/// `Send` (a `std::sync::MutexGuard` is `!Send`).
+#[cfg(test)]
+pub(crate) static WORKSPACE_TEST_GUARD: Lazy<std::sync::Mutex<()>> =
+    Lazy::new(|| std::sync::Mutex::new(()));
+
 /// The built-in file tools an agent needs to read and edit a project.
 /// This is the single source of truth for "which tools make coding work":
 ///
@@ -91,6 +102,7 @@ mod tests {
     // single test fn to avoid cross-test interference.
     #[test]
     fn set_get_relativize_roundtrip() {
+        let _g = super::WORKSPACE_TEST_GUARD.lock().unwrap();
         set(None);
         assert!(get().is_none());
         assert!(name().is_none());

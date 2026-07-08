@@ -23,7 +23,7 @@
 
 use crate::paths;
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Keychain "service" identifier. Combined with the username (the secret key
 /// we pass to `keyring::Entry`) into a single platform-level credential.
@@ -96,8 +96,7 @@ pub enum Backend {
 }
 
 fn keyring_entry(key: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, key)
-        .with_context(|| format!("open keyring entry {SERVICE}/{key}"))
+    keyring::Entry::new(SERVICE, key).with_context(|| format!("open keyring entry {SERVICE}/{key}"))
 }
 
 /// Reject keys that could escape the secrets subdir on the fallback path or
@@ -121,7 +120,11 @@ fn fallback_path(key: &str) -> Result<PathBuf> {
     // we re-check here so a future internal caller can't bypass it.
     validate_key(key)?;
     let dir = paths::root()?.join("secrets");
-    std::fs::create_dir_all(&dir)?;
+    // Do *not* create the dir here: `fallback_read` calls this on every
+    // `get` (including the startup `hf_token_set` sync), so creating it
+    // eagerly would materialise `secrets/` even on a fresh install whose
+    // keychain is perfectly healthy. The dir is created lazily in
+    // `fallback_write` only when a value actually needs to land on disk.
     Ok(dir.join(key))
 }
 
@@ -153,6 +156,10 @@ fn fallback_read(key: &str) -> Result<Option<String>> {
 
 fn fallback_write(key: &str, value: &str) -> Result<()> {
     let p = fallback_path(key)?;
+    // Materialise the secrets dir only now — a keychain that's actually
+    // working never reaches this path, so healthy installs never create
+    // the folder at all.
+    std::fs::create_dir_all(p.parent().unwrap_or_else(|| Path::new(".")))?;
     std::fs::write(&p, value)?;
     // Best-effort: make the file owner-only on POSIX. Windows ACLs already
     // restrict the user's AppData directory by default.

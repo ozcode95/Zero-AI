@@ -14,11 +14,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-log = "2"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,15 +31,17 @@ tokio = { version = "1", features = ["full"] }
 # SSE streaming loop, JSON parsing, and SQLite — and Windows' default heap is
 # the weakest, so it benefits most. Wired up as `#[global_allocator]` in main.rs.
 mimalloc = "0.1"
-# Dev-only Tokio task introspection (tokio-console). Off by default; enable with
-# `--features tokio-console` AND build with `RUSTFLAGS="--cfg tokio_unstable"`.
-console-subscriber = { version = "0.4", optional = true }
 async-trait = "0.1"
 anyhow = "1"
 thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
+# The backend logs through `tracing::` macros. The `log` feature bridges every
+# tracing event into a `log` record when no tracing subscriber is installed —
+# which is exactly our setup: tauri-plugin-log owns the global `log` logger and
+# is the only logging backend, so all backend logs flow through it.
+tracing = { version = "0.1", features = ["log"] }
+# Used for the `log::LevelFilter` we hand to tauri-plugin-log's builder, and as
+# the sink for the tracing→log bridge above.
+log = "0.4"
 directories = "5"
 sysinfo = "0.32"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "multipart"], default-features = false }
@@ -50,7 +55,6 @@ zip = { version = "2", default-features = false, features = ["deflate", "bzip2"]
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 sha2 = "0.10"
 base64 = "0.22"
-arboard = { version = "3", default-features = false }
 regex = "1"
 llmfit-core = "0.9"
 walkdir = "2"
@@ -79,7 +83,3 @@ features = ["formatting", "parsing", "macros"]
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-# Enables the tokio-console layer in `init_tracing`. Dev-only diagnostics for
-# the async streaming pipeline; see the dependency note above for the required
-# `tokio_unstable` build flag.
-tokio-console = ["dep:console-subscriber"]

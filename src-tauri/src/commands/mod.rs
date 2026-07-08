@@ -1,10 +1,12 @@
 //! Tauri command handlers, grouped by domain. Each command is a thin shim
 //! that adapts an IPC call into a backend function, returning `IpcResult<T>`.
 
+pub mod agents_md;
 pub mod attachments;
 pub mod audio;
 pub mod chat;
 pub mod documents;
+pub mod hooks;
 pub mod llama;
 pub mod mcp;
 pub mod memory;

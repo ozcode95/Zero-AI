@@ -109,17 +109,42 @@ pub fn probe() -> Result<Specs> {
     //   - Apple Silicon: unified memory
     // `prefer_discrete_gpus()` inside llmfit filters out iGPUs when a dGPU
     // is present, so every entry here is effectively a discrete accelerator.
+    // iGPUs (e.g. Intel UHD/Iris on a laptop that also has an NVIDIA dGPU) are
+    // dropped by llmfit — re-add them via a WMI name scan so the system info
+    // surface on the settings page lists every graphics adapter.
     let llm_specs = LlmSpecs::detect();
-    let gpus: Vec<GpuInfo> = llm_specs
+    let mut gpus: Vec<GpuInfo> = llm_specs
         .gpus
         .iter()
         .map(|g| GpuInfo {
             name: g.name.clone(),
             vendor: backend_to_vendor(g.backend, &g.name),
             vram_mb: g.vram_gb.map(|v| (v * 1024.0) as u64),
-            kind: GpuKind::Discrete,
+            kind: classify_gpu_kind(&g.name),
         })
         .collect();
+
+    // Re-add integrated GPUs that llmfit dropped when a dGPU was present
+    // (Windows-only — Linux/macOS paths differ and llmfit already keeps the
+    // sole iGPU on iGPU-only hosts).
+    #[cfg(target_os = "windows")]
+    {
+        let known: std::collections::HashSet<String> =
+            gpus.iter().map(|g| g.name.clone()).collect();
+        for name in enumerate_windows_gpu_names() {
+            if known.contains(&name) {
+                continue;
+            }
+            if is_integrated_gpu_name(&name) {
+                gpus.push(GpuInfo {
+                    name: name.clone(),
+                    vendor: infer_vendor_from_name(&name),
+                    vram_mb: None, // iGPUs share system RAM; no dedicated VRAM
+                    kind: GpuKind::Integrated,
+                });
+            }
+        }
+    }
 
     // Detect the maximum CUDA version the NVIDIA driver supports. Used at
     // install time to choose between cuda-13.x and cuda-12.4 llama.cpp assets.
@@ -173,6 +198,97 @@ fn detect_cuda_version_major() -> Option<u32> {
 
 /// Derive a vendor string from llmfit's [`GpuBackend`] tag and the GPU name.
 /// llmfit doesn't expose a separate vendor field, so we infer it.
+/// Classify a GPU name as integrated vs discrete. Mirrors the heuristic in
+/// llmfit-core's `is_integrated_gpu_name` (`src/hardware.rs`) so our `kind`
+/// tag matches what llmfit would call the same adapter.
+fn is_integrated_gpu_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    if lower.contains("(integrated)") {
+        return true;
+    }
+    // Intel integrated: UHD, HD Graphics, Iris — but NOT Intel Arc (discrete).
+    if lower.contains("intel")
+        && !lower.contains("arc")
+        && (lower.contains("uhd") || lower.contains("hd graphics") || lower.contains("iris"))
+    {
+        return true;
+    }
+    // AMD integrated (APU): "Radeon Graphics" / "Radeon(TM) Graphics" without
+    // an RX/PRO/XT discrete designation.
+    if (lower.contains("radeon graphics") || lower.contains("radeon(tm) graphics"))
+        && !lower.contains("rx")
+        && !lower.contains("pro")
+        && !lower.contains("xt")
+    {
+        return true;
+    }
+    false
+}
+
+/// Classify a GPU as `Integrated` / `Discrete` / `Unknown` from its name.
+/// Used for both llmfit-returned GPUs (so an iGPU-only host isn't mis-tagged
+/// `Discrete`) and WMI-recovered names.
+fn classify_gpu_kind(name: &str) -> GpuKind {
+    if is_integrated_gpu_name(name) {
+        GpuKind::Integrated
+    } else if name.trim().is_empty() {
+        GpuKind::Unknown
+    } else {
+        GpuKind::Discrete
+    }
+}
+
+/// Infer a vendor string from a GPU name when the backend tag is unavailable
+/// (recovered iGPUs from WMI). Matches `backend_to_vendor`'s Vulkan branch.
+fn infer_vendor_from_name(name: &str) -> String {
+    let n = name.to_lowercase();
+    if n.contains("nvidia") {
+        "NVIDIA".to_string()
+    } else if n.contains("amd") || n.contains("radeon") {
+        "Advanced Micro Devices".to_string()
+    } else if n.contains("intel") {
+        "Intel".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Enumerate every graphics adapter name Windows reports. Used to recover
+/// iGPUs that llmfit-core drops on hosts that also have a dGPU.
+///
+/// Uses PowerShell + `Get-CimInstance` (`wmic` is deprecated / removed on
+/// recent Windows 11 builds, and not reliably on PATH). Returns an empty list
+/// when PowerShell is unavailable; in that case we fall back to llmfit's
+/// GPU list alone.
+#[cfg(target_os = "windows")]
+fn enumerate_windows_gpu_names() -> Vec<String> {
+    let output = match std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance -ClassName Win32_VideoController | Select-Object -ExpandProperty Name",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = match String::from_utf8(output.stdout) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    // One adapter name per line, possibly with a trailing blank line.
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn backend_to_vendor(backend: GpuBackend, name: &str) -> String {
     let n = name.to_lowercase();
     match backend {
@@ -195,5 +311,3 @@ fn backend_to_vendor(backend: GpuBackend, name: &str) -> String {
         GpuBackend::CpuX86 | GpuBackend::CpuArm => String::new(),
     }
 }
-
-

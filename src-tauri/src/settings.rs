@@ -347,6 +347,13 @@ pub struct Settings {
     /// `None` (the default) means no workspace is open.
     #[serde(default)]
     pub workspace_root: Option<String>,
+    /// User-configured lifecycle + per-tool hooks (Claude-Code-style).
+    /// Empty by default — see [`crate::hooks::HooksConfig`]. The runner
+    /// merges this with the optional `<workspace>/.zero/hooks.json`
+    /// project override at runtime, so storing only the global half here
+    /// is the right split.
+    #[serde(default)]
+    pub hooks: crate::hooks::HooksConfig,
 }
 
 fn default_true() -> bool {
@@ -397,6 +404,7 @@ impl Default for Settings {
             minimize_on_startup: false,
             close_to_taskbar: false,
             workspace_root: None,
+            hooks: crate::hooks::HooksConfig::default(),
         }
     }
 }

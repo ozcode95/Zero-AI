@@ -491,7 +491,7 @@ async fn run_inner(
         ),
     }
 
-    let history = chat::list_messages(db, conversation_id)
+    let mut history = chat::list_messages(db, conversation_id)
         .await
         .map_err(|e| classify_other(&e, &provider_cfg.kind, &base_url))?;
 
@@ -503,6 +503,102 @@ async fn run_inner(
     // they had before.
     let latest_user_msg = history.iter().rev().find(|m| m.role == "user");
     let overrides = resolve_turn_overrides(latest_user_msg);
+
+    // ─── Lifecycle + per-tool hooks (Claude-Code-style) ─────────────────
+    // Resolve the effective hooks config once per turn (global
+    // `Settings.hooks` merged with the optional
+    // `<workspace>/.zero/hooks.json` project override), then thread it
+    // through to the tool-dispatch seam in `run_tool_call`. The
+    // empty-config fast-path skips every hook invocation so a default
+    // install with no hooks configured carries zero overhead.
+    let hooks = crate::hooks::resolve().await;
+    let ws_root: Option<&str> = settings
+        .workspace_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if !hooks.is_empty() {
+        let user_count = history.iter().filter(|m| m.role == "user").count();
+
+        // SessionStart — fire once on the first user turn of a
+        // conversation (history has exactly one user row at that point).
+        // v1 is observe-only: any `additional_context` is appended to the
+        // latest user message *this turn only* (mutating the local
+        // history vec, not the DB row) so the model sees the seeded
+        // context now without persisting an edit. A chat `retry` of the
+        // first turn re-fires the hook; that's acceptable and matches
+        // Claude Code's lazy-on-first-call semantics.
+        if !hooks.session_start.is_empty() && user_count == 1 {
+            let input = crate::hooks::build_input(
+                crate::hooks::HookEvent::SessionStart,
+                conversation_id,
+                assistant_message_id,
+                None,
+                None,
+                None,
+                None,
+                ws_root,
+            );
+            let o = crate::hooks::run_hooks(&hooks.session_start, None, &input).await;
+            if let Some(ctx) = o.additional_context {
+                if !ctx.trim().is_empty() {
+                    if let Some(idx) = history.iter().rposition(|m| m.role == "user") {
+                        history[idx]
+                            .content
+                            .push_str("\n\n[session-start context] ");
+                        history[idx].content.push_str(ctx.trim());
+                    }
+                }
+            }
+        }
+
+        // UserPromptSubmit — fire on every turn right before we build the
+        // request messages. A blocking hook aborts the turn with the
+        // reason surfaced as a short assistant message (the placeholder
+        // row already exists; we just fill it). `additional_context` is
+        // appended to the latest user message *this turn only* (local
+        // mutation, no DB write) so the model sees it without persisting
+        // an edit.
+        if !hooks.user_prompt_submit.is_empty() {
+            let prompt = history
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            let input = crate::hooks::build_input(
+                crate::hooks::HookEvent::UserPromptSubmit,
+                conversation_id,
+                assistant_message_id,
+                None,
+                None,
+                None,
+                Some(prompt),
+                ws_root,
+            );
+            let o = crate::hooks::run_hooks(&hooks.user_prompt_submit, None, &input).await;
+            if o.blocked {
+                let reason = o
+                    .reason
+                    .unwrap_or_else(|| "blocked by UserPromptSubmit hook".into());
+                let body = format!("[blocked by UserPromptSubmit hook: {reason}]");
+                if let Err(e) = chat::update_message(db, assistant_message_id, &body, None).await {
+                    tracing::warn!("failed to persist UserPromptSubmit-block message: {e:#}");
+                }
+                return Ok((false, None));
+            }
+            if let Some(ctx) = o.additional_context {
+                if !ctx.trim().is_empty() {
+                    if let Some(idx) = history.iter().rposition(|m| m.role == "user") {
+                        history[idx]
+                            .content
+                            .push_str("\n\n[prompt-injected context] ");
+                        history[idx].content.push_str(ctx.trim());
+                    }
+                }
+            }
+        }
+    }
 
     // Web-tool gating. The built-in `web.*` tools can reach arbitrary
     // third-party servers, so we keep them locked out of the catalog by
@@ -951,16 +1047,17 @@ async fn run_inner(
             let result_text = if last_round {
                 format!(
                     "[tool budget exhausted after {tool_calls_made} call(s) — \
-                     raise `agent_max_iterations` in Settings to let the \
-                     assistant chain more calls]"
+                         raise `agent_max_iterations` in Settings to let the \
+                         assistant chain more calls]"
                 )
             } else if let Some(s) = &special {
                 s.result_text.clone()
             } else {
-                let (text, was_cancelled) = run_tool_call(
+                let outcome = run_tool_call(
                     app,
                     http,
                     &settings,
+                    &hooks,
                     &tools,
                     call,
                     conversation_id,
@@ -968,10 +1065,19 @@ async fn run_inner(
                     cancel.clone(),
                 )
                 .await;
-                if was_cancelled {
+                if outcome.cancelled {
                     cancelled = true;
                 }
-                text
+                // A Pre/PostToolUse hook can inject standing context that
+                // the model should see alongside the tool result. Prepend it
+                // as a labelled note so the tool's own output stays the main
+                // body the model reasons over.
+                match outcome.injected_context {
+                    Some(ctx) if !ctx.trim().is_empty() => {
+                        format!("[hook injected context] {}\n\n{}", ctx.trim(), outcome.text)
+                    }
+                    _ => outcome.text,
+                }
             };
 
             // A successful `fs.write` / `fs.edit` that actually changed the
@@ -1024,9 +1130,29 @@ async fn run_inner(
         }
     }
 
-    // ─── 5. Final write ──────────────────────────────────────
+    // ─── 5. Final write ──────────────────────────────────
     if cancelled && full_content.is_empty() {
         full_content.push_str("[cancelled]");
+    }
+
+    // Stop hook — fire once at the natural end of the turn (not on a
+    // cancellation). v1 is observe-only: any `blocked` / `reason` /
+    // `additional_context` is ignored and we don't force a continuation
+    // iteration (Claude Code's Stop-hook forced-continue is explicitly
+    // out of scope for v1 — see the plan). Hook failures degrade to
+    // observe-only and never fail the turn.
+    if !cancelled && !hooks.stop.is_empty() {
+        let input = crate::hooks::build_input(
+            crate::hooks::HookEvent::Stop,
+            conversation_id,
+            assistant_message_id,
+            None,
+            None,
+            None,
+            None,
+            ws_root,
+        );
+        let _ = crate::hooks::run_hooks(&hooks.stop, None, &input).await;
     }
 
     // Wire-log the assembled final assistant message. This is the
@@ -1411,21 +1537,39 @@ struct ToolConfirmPayload<'a> {
 /// `tool` message — even rejection paths are written for the model's
 /// consumption.
 #[allow(clippy::too_many_arguments)]
+/// Result of dispatching one tool call, including any context a hook
+/// injected alongside the tool result. `cancelled` is set when the
+/// dispatch returned early because the chat was cancelled; the loop
+/// caller checks it to break out of the agent loop. `injected_context`
+/// carries any `additional_context` from a Pre/PostToolUse hook and is
+/// spliced into the tool-result note the model sees so the hook can
+/// steer the model without rewriting the whole result.
+struct ToolCallOutcome {
+    text: String,
+    cancelled: bool,
+    injected_context: Option<String>,
+}
+
 async fn run_tool_call(
     app: &AppHandle,
     http: &reqwest::Client,
     settings: &Settings,
+    hooks: &crate::hooks::HooksConfig,
     tools: &[EnabledTool],
     call: &ToolCall,
     conversation_id: &str,
     assistant_message_id: &str,
     cancel: Arc<Notify>,
-) -> (String, bool) {
+) -> ToolCallOutcome {
     // OpenAI function names go through our `<server>__<tool>`
     // sanitised encoding; resolve back to the live catalogue entry.
     let func_name = call.function.name.as_str();
     let Some(resolved) = mcp_catalog::resolve_function_name(tools, func_name) else {
-        return (format!("[no enabled tool matches `{func_name}`]"), false);
+        return ToolCallOutcome {
+            text: format!("[no enabled tool matches `{func_name}`]"),
+            cancelled: false,
+            injected_context: None,
+        };
     };
 
     // OpenAI spec: `arguments` is a JSON-encoded **string**. Parse to a
@@ -1443,15 +1587,55 @@ async fn run_tool_call(
                     "tool `{}` arguments did not parse as JSON ({e}); raw: {raw_args}",
                     resolved.schema.name
                 );
-                return (
-                    format!(
+                return ToolCallOutcome {
+                    text: format!(
                         "[invalid arguments for `{}`: not valid JSON — {e}]",
                         resolved.schema.name
                     ),
-                    false,
-                );
+                    cancelled: false,
+                    injected_context: None,
+                };
             }
         }
+    };
+
+    // ── PreToolUse hooks ──────────────────────────────────────────
+    // Fire after name resolution + arg parsing, before any dispatch. A
+    // blocking hook returns `[blocked by hook: …]` as the tool result
+    // — the model sees the reason and can adjust. `additional_context`
+    // is carried out via the outcome and appended to the result note by
+    // the agent loop.
+    let ws_root: Option<&str> = settings
+        .workspace_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let pre_ctx = if hooks.pre_tool_use.is_empty() {
+        None
+    } else {
+        let input = crate::hooks::build_input(
+            crate::hooks::HookEvent::PreToolUse,
+            conversation_id,
+            assistant_message_id,
+            Some(&resolved.schema.name),
+            Some(&arguments),
+            None,
+            None,
+            ws_root,
+        );
+        let pre =
+            crate::hooks::run_hooks(&hooks.pre_tool_use, Some(&resolved.schema.name), &input).await;
+        if pre.blocked {
+            let reason = pre
+                .reason
+                .unwrap_or_else(|| "blocked by PreToolUse hook".into());
+            return ToolCallOutcome {
+                text: format!("[blocked by hook: {reason}]"),
+                cancelled: false,
+                injected_context: pre.additional_context,
+            };
+        }
+        pre.additional_context
     };
 
     // ── tools.list intercept ────────────────────────────────────
@@ -1480,7 +1664,11 @@ async fn run_tool_call(
             .map(str::trim)
             .filter(|s| !s.is_empty());
         let body = mcp_catalog::render_tools_list_result(tools, name_filter, server_filter);
-        return (body, false);
+        return ToolCallOutcome {
+            text: body,
+            cancelled: false,
+            injected_context: pre_ctx,
+        };
     }
 
     // ── Confirm gate ─────────────────────────────────────────
@@ -1511,49 +1699,65 @@ async fn run_tool_call(
                 // dangling sender so the registry doesn't slowly grow,
                 // and surface as cancellation to the caller.
                 confirms.forget(&confirm_id).await;
-                return (
-                    format!(
+                return ToolCallOutcome {
+                    text: format!(
                         "[cancelled while waiting for user to confirm `{}`]",
                         resolved.schema.name
                     ),
-                    true,
-                );
+                    cancelled: true,
+                    injected_context: pre_ctx,
+                };
             }
             decision = rx => decision.unwrap_or(false),
         };
         if !allow {
-            return (
-                format!(
+            return ToolCallOutcome {
+                text: format!(
                     "[refused by user: `{}` on `{}` is marked destructive]",
                     resolved.schema.name, resolved.server_id
                 ),
-                false,
-            );
+                cancelled: false,
+                injected_context: pre_ctx,
+            };
         }
     }
+
+    // Save a copy of the arguments for the PostToolUse hook input before
+    // the execute branches consume `arguments` by value. Only the clone
+    // itself is gated on hooks being configured, so the no-hook path
+    // carries zero extra cost.
+    let args_for_post_hook = if hooks.post_tool_use.is_empty() {
+        None
+    } else {
+        Some(arguments.clone())
+    };
 
     // ── Execute ─────────────────────────────────────────────────
     // Built-in tools live in-process and are dispatched through
     // `mcp::builtin_registry`; everything else is a JSON-RPC call to a
     // configured MCP server. The cancel race wraps both so a `Stop`
-    // mid-execution wins immediately.
-    if resolved.server_id == BUILTIN_SERVER_ID {
+    // mid-execution wins immediately. Both branches funnel into the
+    // `(text, cancelled)` pair that feeds the PostToolUse tail below so a
+    // post hook can rewrite / annotate the result before the loop
+    // returns it to the model.
+    let (text, cancelled): (String, bool) = if resolved.server_id == BUILTIN_SERVER_ID {
         let registry = mcp::builtin_registry(app);
         let Some(tool) = registry
             .into_iter()
             .find(|t| t.schema().name == resolved.schema.name)
         else {
-            return (
-                format!(
+            return ToolCallOutcome {
+                text: format!(
                     "[built-in tool `{}` is no longer registered]",
                     resolved.schema.name
                 ),
-                false,
-            );
+                cancelled: false,
+                injected_context: pre_ctx,
+            };
         };
         let call_fut = async move { tool.call(arguments).await };
         tokio::pin!(call_fut);
-        return tokio::select! {
+        tokio::select! {
             biased;
             _ = cancel.notified() => (
                 format!(
@@ -1567,39 +1771,98 @@ async fn run_tool_call(
                 Ok(out) => (out.content, false),
                 Err(e) => (format!("[built-in tool failed: {e:#}]"), false),
             },
+        }
+    } else {
+        let Some(cfg) = settings
+            .mcp_servers
+            .iter()
+            .find(|s| s.id == resolved.server_id && s.enabled)
+        else {
+            return ToolCallOutcome {
+                text: format!(
+                    "[MCP server `{}` is no longer enabled — cannot dispatch `{}`]",
+                    resolved.server_id, resolved.schema.name
+                ),
+                cancelled: false,
+                injected_context: pre_ctx,
+            };
         };
-    }
-
-    let Some(cfg) = settings
-        .mcp_servers
-        .iter()
-        .find(|s| s.id == resolved.server_id && s.enabled)
-    else {
-        return (
-            format!(
-                "[MCP server `{}` is no longer enabled — cannot dispatch `{}`]",
-                resolved.server_id, resolved.schema.name
+        let call_fut = mcp_client::call_tool(http, cfg, &resolved.schema.name, arguments);
+        tokio::pin!(call_fut);
+        tokio::select! {
+            biased;
+            _ = cancel.notified() => (
+                format!(
+                    "[cancelled while executing `{}` on `{}`]",
+                    resolved.schema.name, resolved.server_id
+                ),
+                true,
             ),
-            false,
-        );
+            result = &mut call_fut => match result {
+                Ok(out) if out.is_error => (format!("[tool reported error]\n{}", out.content), false),
+                Ok(out) => (out.content, false),
+                Err(e) => (format!("[tool call failed: {e:#}]"), false),
+            },
+        }
     };
 
-    let call_fut = mcp_client::call_tool(http, cfg, &resolved.schema.name, arguments);
-    tokio::pin!(call_fut);
-    tokio::select! {
-        biased;
-        _ = cancel.notified() => (
-            format!(
-                "[cancelled while executing `{}` on `{}`]",
-                resolved.schema.name, resolved.server_id
-            ),
-            true,
-        ),
-        result = &mut call_fut => match result {
-            Ok(out) if out.is_error => (format!("[tool reported error]\n{}", out.content), false),
-            Ok(out) => (out.content, false),
-            Err(e) => (format!("[tool call failed: {e:#}]"), false),
-        },
+    // ── PostToolUse hooks ──────────────────────────────────────────
+    // Observer / replacer seam after a tool has executed. On a cancelled
+    // dispatch we skip post hooks entirely (no useful result for a hook
+    // to reshape, and we don't want a slow hook to delay the cancellation
+    // notice). `replace_result` overrides the entire tool output;
+    // `additional_context` is appended as a labelled note; an explicit
+    // `decision: "block"` surfaces as `[hook feedback]` advice rather
+    // than blocking further agent iteration (PostToolUse blocked is
+    // feedback, not a hard stop — see `hooks::HookEvent` table).
+    if cancelled || hooks.post_tool_use.is_empty() {
+        return ToolCallOutcome {
+            text,
+            cancelled,
+            injected_context: pre_ctx,
+        };
+    }
+    let post_input = crate::hooks::build_input(
+        crate::hooks::HookEvent::PostToolUse,
+        conversation_id,
+        assistant_message_id,
+        Some(&resolved.schema.name),
+        args_for_post_hook.as_ref(),
+        Some(&text),
+        None,
+        ws_root,
+    );
+    let mut post = crate::hooks::run_hooks(
+        &hooks.post_tool_use,
+        Some(&resolved.schema.name),
+        &post_input,
+    )
+    .await;
+    let mut text = post.replace_result.unwrap_or(text);
+    let post_ctx = post.additional_context.take();
+    let post_reason = post.reason.take();
+    if let Some(ctx) = &post_ctx {
+        if !ctx.trim().is_empty() {
+            text.push_str("\n\n[hook injected context] ");
+            text.push_str(ctx.trim());
+        }
+    }
+    if post.blocked {
+        if let Some(reason) = &post_reason {
+            if !reason.trim().is_empty() {
+                text.push_str("\n\n[hook feedback] ");
+                text.push_str(reason.trim());
+            }
+        }
+    }
+    let injected_context = match (pre_ctx, post_ctx) {
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (a, b) => a.or(b),
+    };
+    ToolCallOutcome {
+        text,
+        cancelled,
+        injected_context,
     }
 }
 
@@ -2767,6 +3030,18 @@ async fn build_system_prompt(
              you edit, keep changes scoped, and match the surrounding style.\n\n"
         ));
     }
+    // AGENTS.md — user-authored standing instructions from `~/.zero/AGENTS.md`
+    // and/or the active project's AGENTS.md / CLAUDE.md. Treated as authoritative
+    // context from the user: when these instructions conflict with the base
+    // system prompt, the AGENTS.md instructions take precedence. Empty when no
+    // file is present, so a default install carries no extra prompt weight.
+    for doc in crate::agents_md::load().await {
+        out.push_str(&format!(
+            "\n\n# Instructions ({})\n\n{}\n",
+            doc.source,
+            doc.body.trim_end()
+        ));
+    }
     // Single neutral tool-use policy. We deliberately do NOT branch on
     // `loop_mode` (formerly the `/loop` slash-command, now the
     // composer's Agent preset): the earlier per-mode hints framed an
@@ -3374,6 +3649,57 @@ mod tests {
         assert!(settings.workspace_root.is_none());
         let prompt = build_system_prompt(&settings, &[], false, false, true, false, "").await;
         assert!(!prompt.contains("## Workspace"));
+    }
+
+    /// Project `AGENTS.md` injection into the system prompt. We isolate
+    /// writes to a temp dir + the cached workspace so this never touches
+    /// the real `~/.zero/AGENTS.md`; a test-unique marker guards the
+    /// assertion against any global file the dev / CI machine happens to
+    /// already have on disk. Both halves run inside one test fn holding
+    /// [`workspace::WORKSPACE_TEST_GUARD`] so the process-global
+    /// [`workspace::set`] cache mutation can't race with the parallel
+    /// `workspace::tests::set_get_relativize_roundtrip` or the
+    /// `agents_md` command tests. The std `MutexGuard` is `!Send`, so we
+    /// pin this test to the single-thread runtime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_system_prompt_agents_md_present_then_absent() {
+        use crate::workspace as ws;
+        let _g = ws::WORKSPACE_TEST_GUARD.lock().unwrap();
+
+        let dir = std::env::temp_dir().join("zero-build-system-prompt-agents-md-test");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let marker = "__zero_test_agents_md_marker__";
+        tokio::fs::write(dir.join("AGENTS.md"), format!("# Studio rules\n{marker}\n"))
+            .await
+            .unwrap();
+
+        let prev = ws::get();
+
+        // ── present: body + labelled header must surface. ──────────────────
+        ws::set(Some(dir.clone()));
+        let prompt =
+            build_system_prompt(&Settings::default(), &[], false, false, true, false, "").await;
+        assert!(
+            prompt.contains(marker),
+            "project AGENTS.md body should appear in the prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains("# Instructions (") && prompt.contains("the project's AGENTS.md"),
+            "instructions header should name the project file: {prompt}"
+        );
+
+        // ── absent: remove the file and the project-only label must go away.
+        let _ = tokio::fs::remove_file(dir.join("AGENTS.md")).await;
+        let prompt =
+            build_system_prompt(&Settings::default(), &[], false, false, true, false, "").await;
+        assert!(
+            !prompt.contains("the project's AGENTS.md"),
+            "missing project file → no project label in prompt"
+        );
+
+        ws::set(prev);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// With no skills enabled, the `# Skills` catalog section must be

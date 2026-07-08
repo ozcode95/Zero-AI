@@ -1,5 +1,15 @@
 import { create } from "zustand";
 import { invoke } from "@/lib/tauri";
+import {
+  EMPTY_HOOKS,
+  type HooksConfig,
+  type HookMatcher,
+  type HookEvent,
+} from "@/stores/hooks";
+
+// Re-export the hooks shapes here so callers that already import from the
+// settings store can reach them without a second import site.
+export type { HooksConfig, HookMatcher, HookEvent };
 
 export type ProviderKind = "ollama" | "llama.cpp";
 
@@ -224,6 +234,14 @@ export interface Settings {
    * lives here so it round-trips with the rest of the settings file.
    */
   workspace_root: string | null;
+  /**
+   * Global lifecycle hook commands persisted to `settings.json`. The
+   * dedicated Hooks Settings sub-section edits this through the
+   * `useHooksStore` (which calls `hooks_get` / `hooks_set`), but the field
+   * lives here too so a full `settings_save` round-trip can't silently
+   * drop it.
+   */
+  hooks: HooksConfig;
 }
 
 interface SettingsState extends Settings {
@@ -290,6 +308,7 @@ const DEFAULTS: Settings = {
   minimize_on_startup: false,
   close_to_taskbar: false,
   workspace_root: null,
+  hooks: { ...EMPTY_HOOKS },
 };
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({

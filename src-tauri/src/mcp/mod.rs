@@ -70,7 +70,7 @@ pub fn builtin_registry(app: &AppHandle) -> Vec<Box<dyn Tool>> {
     out.extend(tools::shell::all());
     out.extend(tools::http::all(app));
     out.extend(tools::web::all(app));
-    out.extend(tools::clipboard::all());
+    out.extend(tools::clipboard::all(app));
     out.extend(tools::task::all(app));
     // UI-interaction built-ins (clarifying questions + file presentation).
     // Real behaviour is driven by the chat runner, which has the live

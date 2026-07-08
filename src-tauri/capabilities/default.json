@@ -26,6 +26,11 @@
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
-    "notification:default"
+    "notification:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "log:default",
+    "fs:default",
+    { "identifier": "fs:allow-exists", "allow": [{ "path": "**" }] }
   ]
 }

@@ -14,7 +14,9 @@ export type SettingsSection =
   | "system"
   | "memory"
   | "tools"
-  | "skills";
+  | "skills"
+  | "hooks"
+  | "agents_md";
 
 interface UiState {
   view: ViewId;

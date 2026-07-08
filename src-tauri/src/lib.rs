@@ -5,6 +5,7 @@
 
 #![allow(clippy::needless_return)]
 
+pub mod agents_md;
 pub mod attachments;
 pub mod chat;
 pub mod commands;
@@ -13,6 +14,7 @@ pub mod documents;
 pub mod error;
 pub mod events;
 pub mod hf;
+pub mod hooks;
 pub mod llama;
 pub mod llm;
 pub mod mcp;
@@ -30,13 +32,14 @@ pub mod workspace;
 
 use crate::state::AppState;
 use std::sync::Arc;
-use tauri::{Manager, RunEvent};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, RunEvent, WindowEvent,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    init_tracing();
-
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -45,7 +48,49 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                // tauri-plugin-log is the *only* logger in the process: it
+                // installs the global `log` logger during plugin init. The
+                // backend keeps writing through `tracing::` macros, which are
+                // bridged into `log` records by tracing's `log` feature (see
+                // Cargo.toml) — so everything lands here. Installing a second
+                // logger (e.g. tracing-subscriber's LogTracer) would panic
+                // with "logger already initialized", so we don't.
+                //
+                // Targets: terminal (Stdout), devtools (Webview), and a
+                // rolling file under `<root>/logs/zero.log`.
+                .clear_targets()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Folder {
+                        path: paths::logs_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("logs")),
+                        file_name: Some("zero".into()),
+                    },
+                ))
+                .level(log_level())
+                // Keep the backend's own crate chatty (matches the old
+                // `zero_lib=debug` filter) while third-party crates stay at
+                // the global level.
+                .level_for("zero_lib", log::LevelFilter::Debug)
+                .build(),
+        )
         .setup(|app| {
+            // System tray: always present so a hidden window can be
+            // restored. The "minimize on close" behaviour lives in
+            // `close_to_taskbar` (Settings) — when it's on, the main
+            // window's close button hides to tray instead of quitting.
+            build_tray(&app.handle())?;
+            wire_close_to_tray(&app.handle())?;
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = state::AppState::init(handle).await {
@@ -101,6 +146,12 @@ pub fn run() {
             commands::skills::skills_delete,
             commands::skills::skills_set_enabled,
             commands::skills::skills_read_source,
+            // ─── agents.md (context injection) ────────────────────
+            commands::agents_md::agents_md_get,
+            commands::agents_md::agents_md_set,
+            // ─── hooks (lifecycle tool hooks) ────────────────────
+            commands::hooks::hooks_get,
+            commands::hooks::hooks_set,
             // ─── documents (embedding KB) ─────────────────────
             commands::documents::documents_list,
             commands::documents::documents_add,
@@ -160,6 +211,79 @@ pub fn run() {
     });
 }
 
+/// Build the system-tray icon + menu (Show / Quit). Always created at
+/// startup; the close-to-tray *behaviour* is gated by `close_to_taskbar`.
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let show_i = MenuItem::with_id(app, "show", "Show Zero", true, None::<&str>)?;
+    let quit_i = MenuItem::with_id(app, "quit", "Quit Zero", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+    let _tray = TrayIconBuilder::with_id("zero-tray")
+        .tooltip("ZerØ")
+        .icon(app.default_window_icon().cloned().unwrap())
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// Intercept the main window's close button. When `close_to_taskbar` is
+/// on, hide to tray instead of quitting — the tray menu's Show / left-click
+/// restores the window. Off (the default) closes normally.
+fn wire_close_to_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let win = app.get_webview_window("main").expect("main window");
+    let app_for_close = app.clone();
+    win.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            let to_tray = tauri::async_runtime::block_on(async {
+                crate::settings::Settings::load()
+                    .await
+                    .map(|s| s.close_to_taskbar)
+                    .unwrap_or(false)
+            });
+            if to_tray {
+                api.prevent_close();
+                if let Some(w) = app_for_close.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Reveal + focus the main window (called from tray menu / click).
+fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// Max log level for tauri-plugin-log. Defaults to `Info`; override with
+/// `ZERO_LOG_LEVEL=debug|info|warn|error|trace`.
+fn log_level() -> log::LevelFilter {
+    std::env::var("ZERO_LOG_LEVEL")
+        .ok()
+        .and_then(|s| s.parse::<log::LevelFilter>().ok())
+        .unwrap_or(log::LevelFilter::Info)
+}
+
 /// Stop all running llama.cpp instances on app exit.
 fn shutdown_llama<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) {
     let Some(state) = handle.try_state::<Arc<AppState>>() else {
@@ -189,70 +313,4 @@ fn shutdown_llama<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) {
     });
     // If we can't enumerate, just log it.
     let _ = res;
-}
-
-/// Wire up tracing for the whole backend.
-///
-/// Two layers are installed when possible:
-///   * stdout — pretty, ANSI-colored, controlled by `ZERO_LOG`
-///     (defaults to `info,zero_lib=debug`).
-///   * rolling file — written to `<root>/logs/zero.log.<date>`, daily
-///     rotation, no ANSI, with the `target` field included so the
-///     dedicated `llm::wire` channel (request/response bodies) stands
-///     out at a glance.
-///
-/// The file layer is best-effort: if we can't materialise the logs
-/// directory (e.g. read-only home), we fall back to stdout-only rather
-/// than panicking. The non-blocking appender's worker guard is leaked on
-/// purpose so the background flush thread lives for the entire process —
-/// dropping it here would close the channel before `run()` returns.
-fn init_tracing() {
-    // tokio-console layer. Compiled out entirely unless the `tokio-console`
-    // feature is on; `Option<Layer>` is a no-op when `None`, so the registry
-    // builder below stays a single code path in both configurations.
-    #[cfg(feature = "tokio-console")]
-    let console_layer = Some(console_subscriber::spawn());
-    #[cfg(not(feature = "tokio-console"))]
-    let console_layer: Option<tracing_subscriber::layer::Identity> = None;
-
-    let stdout_filter = EnvFilter::try_from_env("ZERO_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info,zero_lib=debug"));
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_target(false)
-        .with_filter(stdout_filter);
-
-    let file_layer = match paths::logs_dir() {
-        Ok(dir) => {
-            let appender = tracing_appender::rolling::daily(&dir, "zero.log");
-            let (nb_writer, guard) = tracing_appender::non_blocking(appender);
-            // Keep the flush thread alive for the lifetime of the process.
-            // Without this the worker shuts down as soon as the guard goes
-            // out of scope and subsequent writes silently disappear.
-            Box::leak(Box::new(guard));
-            let filter = EnvFilter::try_from_env("ZERO_FILE_LOG").unwrap_or_else(|_| {
-                // `llm::wire` and `chat::final` carry the per-turn LLM
-                // request/response bodies and the assembled assistant
-                // turn. They're logged at `debug` so the terminal stays
-                // readable; force them on at `debug` here so the file
-                // always captures them even if ZERO_LOG is quieter.
-                EnvFilter::new("info,zero_lib=debug,llm::wire=debug,chat::final=debug")
-            });
-            let layer = tracing_subscriber::fmt::layer()
-                .with_writer(nb_writer)
-                .with_ansi(false)
-                .with_target(true)
-                .with_filter(filter);
-            Some(layer)
-        }
-        Err(e) => {
-            eprintln!("zero: file logging disabled: {e:?}");
-            None
-        }
-    };
-
-    let _ = tracing_subscriber::registry()
-        .with(console_layer)
-        .with(stdout_layer)
-        .with(file_layer)
-        .try_init();
 }

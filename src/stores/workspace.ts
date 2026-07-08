@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { exists } from "@tauri-apps/plugin-fs";
 import { invoke } from "@/lib/tauri";
 import { useSettingsStore } from "@/stores/settings";
 
@@ -77,6 +78,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setPath: async (path: string) => {
     set({ busy: true });
     try {
+      // Verify the directory is reachable through the file-system plugin
+      // before sending it to the backend. `workspace_set` checks is_dir on
+      // the Rust side too; this catches a stale / inaccessible path early
+      // so a dropped share doesn't clear the workspace silently.
+      try {
+        const ok = await exists(path);
+        if (!ok) {
+          console.error("workspace_set: path does not exist", path);
+          return null;
+        }
+      } catch (e) {
+        console.error("workspace_set: fs exists check failed", e);
+      }
       const ws = await invoke<WorkspaceInfo>("workspace_set", { path });
       set({ workspace: ws });
       // Opening a workspace enables the core file tools on the backend;

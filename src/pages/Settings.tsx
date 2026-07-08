@@ -28,6 +28,8 @@ import {
 import { MemoryView } from "@/pages/Memory";
 import { ToolsView } from "@/pages/Tools";
 import { SkillsView } from "@/pages/Skills";
+import { HooksView } from "@/pages/Hooks";
+import { AgentsMdView } from "@/pages/AgentsMd";
 import {
   LlamaInstallProgressCard,
   LlamaStatusCard,
@@ -81,6 +83,18 @@ const SECTIONS: Section[] = [
     icon: <SkillsIcon />,
   },
   {
+    id: "hooks",
+    label: "Hooks",
+    hint: "Lifecycle tool hooks",
+    icon: <HookIcon />,
+  },
+  {
+    id: "agents_md",
+    label: "Instructions",
+    hint: "AGENTS.md context file",
+    icon: <DocIcon />,
+  },
+  {
     id: "system",
     label: "System",
     hint: "Host hardware snapshot",
@@ -91,7 +105,13 @@ const SECTIONS: Section[] = [
 /** Sections that embed a former top-level page. These render full-width
  * and manage their own height/scroll, so we skip the narrow centered
  * column the native settings sections use. */
-const PAGE_SECTIONS = new Set<SettingsSection>(["memory", "tools", "skills"]);
+const PAGE_SECTIONS = new Set<SettingsSection>([
+  "memory",
+  "tools",
+  "skills",
+  "hooks",
+  "agents_md",
+]);
 
 // ─── page shell ──────────────────────────────────────────────────────
 
@@ -156,6 +176,8 @@ export function SettingsView() {
           {section === "memory" && <MemoryView />}
           {section === "tools" && <ToolsView />}
           {section === "skills" && <SkillsView />}
+          {section === "hooks" && <HooksView />}
+          {section === "agents_md" && <AgentsMdView />}
         </div>
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto pr-1">
@@ -412,13 +434,13 @@ function GeneralSection() {
           }
         />
         <Field
-          label="Close button minimizes to taskbar"
-          hint="Keep zero running in the background when you press the window's close button instead of quitting."
+          label="Close button minimizes to tray"
+          hint="Keep zero running in the background when you press the window's close button instead of quitting. Restore it from the system-tray icon (click or Show menu)."
           control={
             <Toggle
               checked={s.close_to_taskbar}
               onChange={(v) => void s.save({ close_to_taskbar: v })}
-              label="Minimize on close"
+              label="Minimize to tray on close"
             />
           }
         />
@@ -1351,6 +1373,43 @@ function SkillsIcon() {
       strokeLinejoin="round"
     >
       <path d="M12 3 14.5 9l6 .5-4.6 4 1.5 6L12 16l-5.4 3.5 1.5-6L3.5 9.5 9.5 9 12 3Z" />
+    </svg>
+  );
+}
+
+function HookIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M7 4v6a5 5 0 0 0 10 0V4" />
+      <path d="M12 15v3a3 3 0 0 0 6 0" />
+    </svg>
+  );
+}
+
+function DocIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3v5h5" />
+      <path d="M9 13h6M9 17h4" />
     </svg>
   );
 }
